@@ -7,11 +7,11 @@ export function mediaUrl(value) {
     return ['https:', 'http:'].includes(url.protocol) ? url.href : '';
   } catch { return ''; }
 }
-export async function request(path, { token, body, signal } = {}) {
+export async function request(path, { token, body, method, signal } = {}) {
   let response;
   try {
     response = await fetch(`${API_URL}${path}`, {
-      method: body === undefined ? 'GET' : 'POST',
+      method: method || (body === undefined ? 'GET' : 'POST'),
       headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: signal || AbortSignal.timeout(30000),

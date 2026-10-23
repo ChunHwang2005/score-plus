@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseQuestion, resultPayload, unwrap } from '../lib/practice.mjs';
+import { answerKey, formatDuration, historyStats, pageWindow, parseQuestion, resultPayload, resultSummary, reviewItems, unwrap } from '../lib/practice.mjs';
 import { request } from '../lib/api.mjs';
 
 test('parses ScoreUp unified and legacy questions', () => {
@@ -42,4 +42,33 @@ test('API surfaces expired sessions instead of treating them as success', async 
   global.fetch = async () => new Response(JSON.stringify({ message: 'Invalid token' }), { status: 401 });
   try { await assert.rejects(request('/questions'), error => error.status === 401); }
   finally { global.fetch = original; }
+});
+
+test('review normalizes populated ScoreUp results, including legacy answer formats', () => {
+  const result = {
+    total: 3, correct: 1, start: '2026-01-01T00:00:00Z', end: '2026-01-01T00:05:30Z',
+    questions: [{ section: 'Chương 1', questions: [
+      { question: { _id: 'q1', content: { question: 'A?', options: ['x', 'y'] }, correct_index: 1 }, user_ans: ['B'], correct_ans: ['B'], score: 1 },
+      { question: { _id: 'q2', content: { question: 'B?', options: ['x', 'y'] }, correct_index: 0 }, user_ans: [1], correct_ans: [], score: 0 },
+      { question: null, user_ans: [], correct_ans: ['A'], score: 0 },
+    ] }],
+  };
+  const items = reviewItems(result);
+  assert.deepEqual(items.map(i => i.status), ['correct', 'wrong', 'skipped']);
+  assert.equal(items[1].selected, 'B');
+  assert.equal(items[1].correct, 'A'); // Fallback to the question's own key.
+  assert.equal(items[2].question, null);
+  const summary = resultSummary(result);
+  assert.equal(summary.percent, 33);
+  assert.equal(formatDuration(summary.duration), '5 phút 30 giây');
+  assert.equal(answerKey('y', [{ key: 'A', text: 'x' }, { key: 'B', text: 'y' }]), 'B');
+  assert.deepEqual(historyStats([result, { total: 2, correct: 2 }]), { count: 2, average: 67, best: 100 });
+});
+
+test('pageWindow keeps first/last pages and collapses gaps', () => {
+  assert.deepEqual(pageWindow(1, 1), [1]);
+  assert.deepEqual(pageWindow(1, 4), [1, 2, 3, 4]); // gap of one page is shown, not '…'
+  assert.deepEqual(pageWindow(5, 10), [1, '…', 4, 5, 6, '…', 10]);
+  assert.deepEqual(pageWindow(10, 10), [1, '…', 9, 10]);
+  assert.deepEqual(pageWindow(3, 10), [1, 2, 3, 4, '…', 10]);
 });

@@ -1,31 +1,30 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { MorphIcon } from 'morphicons/react';
-import { BookOpen, Check, CheckCircle2, CircleHelp, Clock3, GraduationCap, RefreshCw, Send, Sparkles, X } from 'lucide-react';
-import { BookOpen as BookOpenData, Check as CheckData, CircleHelp as CircleHelpData, GraduationCap as GraduationCapData, RefreshCw as RefreshCwData, Send as SendData, X as XData } from 'lucide';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, BookOpen, Check, CheckCircle2, ChevronRight, CircleHelp, Clock3, GraduationCap, LogOut, RefreshCw, Save, Send, Sparkles, X } from 'lucide-react';
 import { mediaUrl, request } from '../lib/api.mjs';
-import { chapterName, parseQuestion, resultPayload, unwrap } from '../lib/practice.mjs';
+import { certificateIdOf, chapterName, parseQuestion, resultPayload, sectionOf, unwrap } from '../lib/practice.mjs';
+import { createDraftStore, newAttemptId } from '../lib/drafts.mjs';
 import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
+import Markdown from './Markdown';
+import Modal from './Modal';
+import { HistoryList, ResultReview, ScoreRing } from './History';
 import { clearStandaloneSession, isStandalone, loadStandaloneSession, microsoftLoginUrl } from '../lib/microsoft-auth.mjs';
 
 // Endpoint SSO của AI-Portal (backend routes/scoreplus.ts); env chỉ dùng khi Portal đặt endpoint ở path khác.
 const SESSION_PATH = process.env.NEXT_PUBLIC_PORTAL_SCOREUP_SESSION_PATH || '/api/scoreplus/session';
-function Markdown({ children }) {
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{String(children || '')}</ReactMarkdown></div>;
-}
-
-const iconData = { book: BookOpenData, check: CheckData, help: CircleHelpData, graduation: GraduationCapData, refresh: RefreshCwData, send: SendData, close: XData };
-function Icon({ name, size = 18, className = 'icon' }) {
-  const data = iconData[name];
-  return data ? <MorphIcon icon={data} size={size} className={className} spring="snappy" reducedMotion="user" /> : null;
-}
 
 export default function Practice() {
+  // 'home' (thiết lập + lịch sử) | 'exam' (trang làm bài) | 'review' — giữ trong state, không đổi URL vì app chạy trong iframe của Portal.
+  const [view, setView] = useState('home');
+  const [reviewId, setReviewId] = useState('');
+  const [drafts, setDrafts] = useState([]);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const [successOpen, setSuccessOpen] = useState(false);
+  const [draftSave, setDraftSave] = useState('idle');
   const [subjects, setSubjects] = useState([]);
   const [subjectId, setSubjectId] = useState('');
   const [chapter, setChapter] = useState('');
@@ -54,11 +53,11 @@ export default function Practice() {
   const authGeneration = useRef(0);
   const [reload, setReload] = useState(0);
   const actionLock = useRef(false);
-  const submitDialog = useRef(null);
   const toastTimer = useRef(null);
   const subject = subjects.find(s => s._id === subjectId);
   const answered = questions.filter(q => answers[q.id]).length;
   const correct = questions.filter(q => answers[q.id] && answers[q.id] === q.correct).length;
+  const userId = session ? String(session.user._id || session.user.id) : '';
 
   useEffect(() => {
     const theme = new URLSearchParams(window.location.search).get('theme');
@@ -91,7 +90,7 @@ export default function Practice() {
         setSession(null);
         setQuestions([]); setAnswers({}); setBatch(null); setSaved(null); setSubmitted(false);
         setHints({}); setHintBusy({}); setSubmitConfirmOpen(false);
-        setToast(null); setError('');
+        setToast(null); setError(''); setView('home'); setReviewId(''); setLeaveOpen(false); setSuccessOpen(false);
       }
       portalIdentity.current = user?.id || null;
       setPortalUser(user);
@@ -175,10 +174,105 @@ export default function Practice() {
     return () => controller.abort();
   }, [reload]);
 
+  const draftStore = useMemo(() => session ? createDraftStore({ token: session.token, userId, request }) : null, [session?.token, userId]);
+  const pendingSave = useRef(null);
+  const activeAttempt = useRef('');
+
   useEffect(() => {
-    if (submitConfirmOpen && !submitDialog.current?.open) submitDialog.current?.showModal();
-    else if (!submitConfirmOpen) submitDialog.current?.close();
-  }, [submitConfirmOpen]);
+    setDrafts([]);
+    if (!draftStore) return;
+    let cancelled = false;
+    draftStore.list().then(list => { if (!cancelled) setDrafts(list); }).catch(e => {
+      if (cancelled) return;
+      if (e.status === 401) expireSession();
+      else notify('error', 'Chưa tải được bài chưa nộp', e.message);
+    });
+    return () => { cancelled = true; };
+  }, [draftStore]);
+
+  function upsertDraft(summary) { setDrafts(list => [summary, ...list.filter(d => d.id !== summary.id)]); }
+
+  // Ghi nháp tuần tự: mỗi lần lưu chờ lần trước xong, để PUT cũ không tới server sau khi đã nộp/xoá.
+  function persistDraft(draft) {
+    const run = (pendingSave.current || Promise.resolve()).catch(() => {}).then(() => draftStore.save(draft));
+    pendingSave.current = run;
+    return run;
+  }
+  async function settleSaves() { await pendingSave.current?.catch(() => {}); }
+
+  // Tự lưu nháp khi đang làm bài (chỉ khi đã trả lời ít nhất 1 câu) để rời trang / đổi thiết bị vẫn làm tiếp được.
+  useEffect(() => {
+    if (view !== 'exam' || submitted || !batch?.id || batch.userId !== userId || !answered || !draftStore) return;
+    const timer = setTimeout(() => {
+      setDraftSave('saving');
+      persistDraft(draftOf()).then(summary => {
+        if (activeAttempt.current !== summary.id) return;
+        upsertDraft(summary); setDraftSave('saved');
+      }).catch(() => { if (activeAttempt.current === batch.id) setDraftSave('error'); });
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [view, submitted, batch, answers, questions, userId, draftStore]);
+
+  function draftOf() {
+    return { id: batch.id, subject: batch.subject, chapter: batch.chapter, label: batch.label || '', instant: batch.instant, start: batch.start, questions, answers };
+  }
+
+  function clearAttempt() {
+    activeAttempt.current = '';
+    setQuestions([]); setAnswers({}); setBatch(null); setSaved(null); setSubmitted(false); setDraftSave('idle');
+    setHints({}); setHintBusy({}); setSubmitConfirmOpen(false); setLeaveOpen(false); setSuccessOpen(false);
+  }
+
+  function goHome() { clearAttempt(); setView('home'); window.scrollTo?.({ top: 0 }); }
+
+  function enterExam(nextBatch, nextQuestions, nextAnswers = {}) {
+    activeAttempt.current = nextBatch.id;
+    setQuestions(nextQuestions); setAnswers(nextAnswers); setBatch(nextBatch); setDraftSave('idle');
+    setSaved(null); setSubmitted(false); setHints({}); setHintBusy({});
+    setView('exam'); window.scrollTo?.({ top: 0 });
+  }
+
+  function leave() {
+    if (submitted || !answered) {
+      // Chưa làm câu nào: không giữ nháp (kể cả bản cũ khi mở lại rồi bỏ hết đáp án).
+      const id = batch?.id;
+      if (id && !submitted && draftStore && drafts.some(d => d.id === id)) {
+        settleSaves().then(() => draftStore.remove(id)).catch(() => {});
+        setDrafts(list => list.filter(d => d.id !== id));
+      }
+      goHome(); return;
+    }
+    setLeaveOpen(true);
+  }
+
+  function confirmLeave() {
+    if (batch?.userId !== userId) { goHome(); return; }
+    const draft = draftOf();
+    run('leave', async () => {
+      const summary = await persistDraft(draft);
+      upsertDraft(summary);
+      goHome();
+      notify('success', 'Đã lưu bài chưa nộp', draftStore.mode === 'server' ? 'Bạn có thể làm tiếp trong Lịch sử làm bài, kể cả trên thiết bị khác.' : 'Bạn có thể làm tiếp trong Lịch sử làm bài trên trình duyệt này.');
+    });
+  }
+
+  function resume(summary) {
+    if (!session || !draftStore) return;
+    run(`resume:${summary.id}`, async () => {
+      const draft = await draftStore.get(summary.id);
+      if (!draft.questions.length) throw new Error('Các câu hỏi của bài này không còn trong ngân hàng câu hỏi.');
+      const selected = subjects.find(s => s._id === draft.subject?._id) || draft.subject;
+      enterExam({ id: draft.id, subject: selected, chapter: draft.chapter || '', label: draft.label || '', instant: !!draft.instant, start: draft.start, userId }, draft.questions, draft.answers || {});
+    });
+  }
+
+  function deleteDraft(summary) {
+    if (!draftStore || !window.confirm(`Xoá bài chưa nộp "${summary.subjectName} · ${sectionOf(summary)}"? Không thể khôi phục.`)) return;
+    run(`delete:${summary.id}`, async () => {
+      await draftStore.remove(summary.id);
+      setDrafts(list => list.filter(d => d.id !== summary.id));
+    });
+  }
 
   function signIn() {
     try { window.location.assign(microsoftLoginUrl()); }
@@ -190,7 +284,8 @@ export default function Practice() {
     authGeneration.current += 1;
     setSession(null); setPortalUser(null);
     setQuestions([]); setAnswers({}); setBatch(null); setSaved(null); setSubmitted(false);
-    setHints({}); setHintBusy({}); setSubmitConfirmOpen(false);
+    setHints({}); setHintBusy({}); setSubmitConfirmOpen(false); setLeaveOpen(false); setSuccessOpen(false);
+    setView('home'); setReviewId(''); setDrafts([]);
     setAuthError(''); setAuthState('signed-out');
   }
 
@@ -204,19 +299,33 @@ export default function Practice() {
       if (generation !== authGeneration.current) return;
       setError(e.message);
       notify('error', 'Có lỗi xảy ra', e.message);
-      if (e.status === 401) {
-        setSession(null);
-        authGeneration.current += 1;
-        if (standalone) {
-          clearStandaloneSession();
-          setAuthState('signed-out');
-          setAuthError('Phiên ScoreUp đã hết hạn. Hãy đăng nhập lại.');
-        } else {
-          setAuthState('error');
-          setAuthError('Phiên kết nối đã hết hạn. Hãy thử kết nối lại hoặc mở lại công cụ từ AI-Portal.');
-        }
-      }
+      if (e.status === 401) expireSession();
     } finally { actionLock.current = false; setBusy(''); }
+  }
+
+  function expireSession() {
+    setSession(null);
+    authGeneration.current += 1;
+    if (standalone) {
+      clearStandaloneSession();
+      setAuthState('signed-out');
+      setAuthError('Phiên ScoreUp đã hết hạn. Hãy đăng nhập lại.');
+    } else {
+      setAuthState('error');
+      setAuthError('Phiên kết nối đã hết hạn. Hãy thử kết nối lại hoặc mở lại công cụ từ AI-Portal.');
+    }
+  }
+
+  function openReview(id) { setReviewId(id); setView('review'); }
+
+  // Từ màn xem lại: tạo lượt mới chỉ gồm các câu sai/bỏ trống (đã có sẵn nội dung, không cần gọi API).
+  function retryQuestions(result, retry) {
+    if (!session) return;
+    const selected = subjects.find(s => certificateIdOf(s) === result.certificateId);
+    if (!selected) { notify('error', 'Không tìm thấy môn học', 'Môn của lượt này không còn trong danh sách luyện tập.'); return; }
+    setSubjectId(selected._id); setChapter('');
+    enterExam({ id: newAttemptId(), subject: selected, chapter: '', label: 'Ôn lại câu chưa đúng', instant, start: new Date().toISOString(), userId }, retry);
+    notify('success', 'Đã tạo lượt ôn lại', `${retry.length} câu chưa đúng từ lượt trước.`);
   }
 
   async function requestHint(question) {
@@ -267,8 +376,7 @@ export default function Practice() {
   function start(append = false) {
     if (!session) return;
     if (!subject) return;
-    if (append && batch?.userId !== (session.user._id || session.user.id)) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
-    if (!append && questions.length && !submitted && !window.confirm('Bắt đầu lượt mới? Câu trả lời chưa nộp sẽ bị xóa.')) return;
+    if (append && batch?.userId !== userId) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
     const selected = append ? batch.subject : subject;
     const selectedChapter = append ? batch.chapter : chapter;
     const generation = authGeneration.current;
@@ -282,12 +390,11 @@ export default function Practice() {
         existing.add(q.id); return true;
       });
       if (!parsed.length) throw new Error(append ? 'Chưa có câu hỏi mới trong lượt này. Bạn có thể thử lại.' : 'Chưa có câu hỏi cho lựa chọn này. Hãy chọn chương hoặc môn khác.');
-      setQuestions(current => append ? [...current, ...parsed] : parsed);
       if (!append) {
-        setAnswers({}); setSaved(null); setSubmitted(false);
-        setBatch({ subject: selected, chapter: selectedChapter, instant, start: new Date().toISOString(), userId: session.user._id || session.user.id });
+        enterExam({ id: newAttemptId(), subject: selected, chapter: selectedChapter, instant, start: new Date().toISOString(), userId }, parsed);
         notify('success', 'Đã bắt đầu luyện tập', `${selected.subject_name} · ${parsed.length} câu hỏi`);
       } else {
+        setQuestions(current => [...current, ...parsed]);
         notify('success', 'Đã thêm câu hỏi', `Thêm ${parsed.length} câu mới vào lượt luyện tập.`);
       }
     });
@@ -302,62 +409,91 @@ export default function Practice() {
   function confirmSubmit() {
     if (!session || submitted || !questions.length) return;
     setSubmitConfirmOpen(false);
-    if (batch.userId !== (session.user._id || session.user.id)) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
+    if (batch.userId !== userId) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
     const generation = authGeneration.current;
     run('submit', async () => {
-      const payload = resultPayload({ questions, answers, subject: batch.subject, section: batch.chapter ? chapterName(batch.chapter) : 'Luyện ngẫu nhiên', start: batch.start, end: new Date().toISOString() });
-      const result = unwrap(await request('/questions/result', { token: session.token, body: payload }));
+      const payload = resultPayload({ questions, answers, subject: batch.subject, section: sectionOf(batch), start: batch.start, end: new Date().toISOString() });
+      // Chờ lần tự lưu đang chạy xong, rồi ScoreUp xoá nháp theo draftId cùng lúc lưu kết quả.
+      await settleSaves();
+      const result = unwrap(await request('/questions/result', { token: session.token, body: { ...payload, draftId: batch.id } }));
       if (generation !== authGeneration.current) return;
       setSaved(result); setSubmitted(true);
-      notify('success', 'Đã lưu kết quả', `Bạn trả lời đúng ${correct}/${questions.length} câu.`);
+      activeAttempt.current = '';
+      if (draftStore?.mode === 'local') draftStore.remove(batch.id).catch(() => {});
+      setDrafts(list => list.filter(d => d.id !== batch.id));
+      setHistoryVersion(v => v + 1);
+      setSuccessOpen(true);
     });
   }
 
-  return <main className="workspace">
-    <div className="liquid-bg" aria-hidden="true"><span /><span /><span /><span /></div>
-    {toast && <div className="toast-region" aria-live="polite" aria-atomic="true"><div key={toast.id} className={`toast ${toast.kind}`}><span className="toast-icon">{toast.kind === 'success' ? <CheckCircle2 className="icon" /> : <CircleHelp className="icon" />}</span><div className="toast-copy"><strong>{toast.title}</strong><p>{toast.message}</p></div><button className="toast-close" aria-label="Đóng thông báo" onClick={() => setToast(null)}><X className="icon" /></button></div></div>}
-    <header className="page-heading">
-      <div className="title-block"><div className="eyebrow"><GraduationCap className="icon" /> SCOREPLUS <span>/</span> HỌC TẬP</div><h1>Luyện tập</h1><p>Ôn luyện theo môn học, củng cố kiến thức qua từng câu hỏi.</p></div>
-      <div className="account" aria-live="polite"><span className="avatar" aria-hidden="true">{(portalUser?.name || portalUser?.email || (standalone ? 'S' : 'A')).trim().charAt(0).toUpperCase()}</span><div className="account-text"><span>{portalUser?.name || portalUser?.email || (standalone ? 'ScoreUp' : 'AI-Portal')}</span><span className={`muted small account-status ${authState}`}>{authState === 'ready' ? 'Đã kết nối' : authState === 'connecting' ? 'Đang kết nối…' : authState === 'waiting' ? 'Đang nhận tài khoản…' : authState === 'signed-out' ? 'Chưa đăng nhập' : 'Chưa kết nối ScoreUp'}</span>{standalone && authState === 'ready' && <Button variant="text" disabled={!!busy} onClick={signOut}>Đăng xuất</Button>}</div></div>
-    </header>
-
+  const notices = <>
     {standalone && authState === 'signed-out' && <div className="notice" role="status"><span>Đăng nhập bằng tài khoản Microsoft NEU để làm bài và lưu kết quả.</span><Button onClick={signIn}>Đăng nhập với Microsoft (NEU)</Button></div>}
     {authError && <div className="notice error" role="alert"><span>{authError}</span>{!standalone && <Button variant="text" disabled={!!busy || authState === 'connecting'} onClick={() => { setAuthError(''); setAuthState('waiting'); setAuthReload(v => v + 1); }}>Kết nối lại</Button>}</div>}
     {error && <div className="notice error" role="alert"><span>{error}</span><Button variant="text" onClick={() => setError('')}>Đóng</Button></div>}
-    <section className="panel filters" aria-labelledby="filter-title">
-      <div className="panel-heading"><h2 id="filter-title">Thiết lập luyện tập</h2><span className="muted">Chọn nội dung bạn muốn ôn luyện</span></div>
-      <div className="filter-grid">
-        <Dropdown label="Môn học" value={subjectId} disabled={loadingSubjects || !!busy} placeholder={loadingSubjects ? 'Đang tải môn học…' : 'Chọn môn học'} options={subjects.map(s => ({ value: s._id, label: s.subject_name }))} onChange={value => { setSubjectId(value); setChapter(''); }} />
-        <Dropdown label="Chương / Nội dung" value={chapter} disabled={!subject || !!busy} onChange={setChapter} options={[{ value: '', label: 'Ngẫu nhiên toàn môn' }, ...(subject?.chapters || []).map(c => (typeof c === 'string' ? c : c.chapter)).filter(Boolean).map(id => ({ value: id, label: chapterName(id) }))]} />
-        <Dropdown label="Số câu hỏi" value={count} disabled={!!busy} onChange={setCount} options={[5, 10, 15, 20, 30, 50].map(n => ({ value: n, label: `${n} câu` }))} />
-        <Button className="start" disabled={!subject || !!busy || !session} loading={busy === 'questions'} loadingText="Đang lấy câu hỏi…" icon={<Sparkles className="icon" />} onClick={() => start()}>{questions.length ? 'Bắt đầu lượt mới' : 'Bắt đầu luyện tập'}</Button>
-      </div>
-      <div className="filter-footer"><label className="checkbox"><input type="checkbox" checked={instant} disabled={!!busy} onChange={e => setInstant(e.target.checked)} />Hiện đáp án sau mỗi câu <span className="muted">(áp dụng cho lượt mới)</span></label><Button variant="text" disabled={loadingSubjects || !!busy} icon={<RefreshCw className="icon" />} onClick={() => { setError(''); setReload(v => v + 1); }}>Tải lại môn học</Button></div>
-    </section>
+  </>;
+  const percent = questions.length ? Math.round(correct / questions.length * 100) : 0;
 
-    {!questions.length ? <section className="panel empty"><div className="book-icon" aria-hidden="true"><Icon name="book" size={30} className="icon-lg" /></div><h2>{loadingSubjects ? 'Đang tải môn học…' : 'Sẵn sàng cho buổi luyện tập?'}</h2><p>Chọn môn học và số câu hỏi, sau đó bắt đầu.<br />Bạn có thể luyện ngẫu nhiên hoặc tập trung vào từng chương.</p>{!loadingSubjects && !subjects.length && <p>Chưa có môn học để luyện tập. Hãy thử tải lại danh sách.</p>}{!session && <p className="muted" role="status">{authState === 'connecting' || authState === 'waiting' ? (standalone ? 'Đang kiểm tra đăng nhập…' : 'Đang kết nối tài khoản từ AI-Portal…') : standalone ? 'Cần đăng nhập Microsoft NEU để làm bài và lưu kết quả.' : 'Cần kết nối phiên AI-Portal với ScoreUp để làm bài và lưu kết quả.'}</p>}</section> : <div className="practice-layout">
-      <section className="question-list" aria-label="Các câu hỏi">
-        <div className="learning-heading"><div><span className="muted">Bạn đang học</span><h2>{batch.subject.subject_name}</h2></div><span className="badge"><BookOpen className="icon" /> {batch.chapter ? chapterName(batch.chapter) : 'Luyện ngẫu nhiên'}</span></div>
-        {submitted && <div className="notice success" role="status"><div><strong>Hoàn thành! {correct}/{questions.length} câu đúng · {Math.round(correct / questions.length * 100)}%</strong><p>Kết quả đã được lưu vào tài khoản ScoreUp.{saved?._id ? ` Mã kết quả: ${saved._id}` : ''}</p></div></div>}
-        {questions.map((q, i) => {
-          const reveal = submitted || (batch.instant && !!answers[q.id]);
-          return <article className="panel question" key={q.id} id={`question-${i}`}>
-            <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {i + 1}</span><span className="muted">{reveal ? answers[q.id] === q.correct ? '✓ Chính xác' : 'Cần ôn lại' : answers[q.id] ? 'Đã trả lời' : 'Chưa trả lời'}</span></div>
-            {q.context && <Markdown>{q.context}</Markdown>}<Markdown>{q.question}</Markdown>
-            {q.image && mediaUrl(q.image) && <img className="question-image" src={mediaUrl(q.image)} alt={`Hình minh họa câu ${i + 1}`} />}
-            {q.audio && mediaUrl(q.audio) && <audio controls src={mediaUrl(q.audio)} />}
-            {q.code && <pre><code>{q.code}</code></pre>}
-            {!submitted && <div className="ai-tutor"><Button variant="secondary" size="sm" disabled={!!busy} loading={!!hintBusy[q.id]} loadingText="Gia sư đang suy nghĩ…" icon={<Sparkles className="icon" />} onClick={() => requestHint(q)}>{hints[q.id] ? 'Hỏi gia sư gợi ý khác' : 'Gợi ý từ gia sư AI'}</Button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>Gợi ý học tập</strong></div><Markdown>{hints[q.id]}</Markdown><p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p></div>}</div>}
-            <fieldset className="options" disabled={!!busy || !session || submitted || (batch.instant && !!answers[q.id])}><legend className="sr-only">Đáp án câu {i + 1}</legend>{q.options.map(option => <label key={option.key} className={`option ${answers[q.id] === option.key ? 'selected' : ''} ${reveal && q.correct === option.key ? 'correct' : ''} ${reveal && answers[q.id] === option.key && q.correct !== option.key ? 'wrong' : ''}`}><input type="radio" name={`answer-${q.id}`} value={option.key} checked={answers[q.id] === option.key} onChange={() => setAnswers(current => ({ ...current, [q.id]: option.key }))} /><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown></label>)}</fieldset>
-            {reveal && <div className="explanation"><strong>Đáp án: {q.correct || 'Chưa có'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>}
-          </article>;
-        })}
-        {!submitted && <Button variant="secondary" full disabled={!!busy || !session} icon={<Sparkles className="icon" />} onClick={() => start(true)}>Làm tiếp · thêm {count} câu</Button>}
+  return <main className={`workspace ${view === 'exam' ? 'exam-mode' : ''}`}>
+    <div className="liquid-bg" aria-hidden="true"><span /><span /><span /><span /></div>
+    {toast && <div className="toast-region" aria-live="polite" aria-atomic="true"><div key={toast.id} className={`toast ${toast.kind}`}><span className="toast-icon">{toast.kind === 'success' ? <CheckCircle2 className="icon" /> : <CircleHelp className="icon" />}</span><div className="toast-copy"><strong>{toast.title}</strong><p>{toast.message}</p></div><button className="toast-close" aria-label="Đóng thông báo" onClick={() => setToast(null)}><X className="icon" /></button></div></div>}
+
+    {view !== 'exam' && <header className="page-heading">
+      <div className="title-block"><div className="eyebrow"><GraduationCap className="icon" /> SCOREPLUS <span>/</span> HỌC TẬP</div><h1>Luyện tập</h1><p>Ôn luyện theo môn học, củng cố kiến thức qua từng câu hỏi.</p></div>
+      <div className="account" aria-live="polite"><span className="avatar" aria-hidden="true">{(portalUser?.name || portalUser?.email || (standalone ? 'S' : 'A')).trim().charAt(0).toUpperCase()}</span><div className="account-text"><span>{portalUser?.name || portalUser?.email || (standalone ? 'ScoreUp' : 'AI-Portal')}</span><span className={`muted small account-status ${authState}`}>{authState === 'ready' ? 'Đã kết nối' : authState === 'connecting' ? 'Đang kết nối…' : authState === 'waiting' ? 'Đang nhận tài khoản…' : authState === 'signed-out' ? 'Chưa đăng nhập' : 'Chưa kết nối ScoreUp'}</span>{standalone && authState === 'ready' && <Button variant="text" disabled={!!busy} onClick={signOut}>Đăng xuất</Button>}</div></div>
+    </header>}
+
+    {view === 'home' && <>
+      {notices}
+      <section className="panel filters" aria-labelledby="filter-title">
+        <div className="panel-heading"><h2 id="filter-title">Thiết lập luyện tập</h2><span className="muted">Chọn nội dung bạn muốn ôn luyện</span></div>
+        <div className="filter-grid">
+          <Dropdown label="Môn học" value={subjectId} disabled={loadingSubjects || !!busy} placeholder={loadingSubjects ? 'Đang tải môn học…' : 'Chọn môn học'} options={subjects.map(s => ({ value: s._id, label: s.subject_name }))} onChange={value => { setSubjectId(value); setChapter(''); }} />
+          <Dropdown label="Chương / Nội dung" value={chapter} disabled={!subject || !!busy} onChange={setChapter} options={[{ value: '', label: 'Ngẫu nhiên toàn môn' }, ...(subject?.chapters || []).map(c => (typeof c === 'string' ? c : c.chapter)).filter(Boolean).map(id => ({ value: id, label: chapterName(id) }))]} />
+          <Dropdown label="Số câu hỏi" value={count} disabled={!!busy} onChange={setCount} options={[5, 10, 15, 20, 30, 50].map(n => ({ value: n, label: `${n} câu` }))} />
+          <Button className="start" disabled={!subject || !!busy || !session} loading={busy === 'questions'} loadingText="Đang lấy câu hỏi…" icon={<Sparkles className="icon" />} onClick={() => start()}>Bắt đầu làm bài</Button>
+        </div>
+        <div className="filter-footer"><label className="checkbox"><input type="checkbox" checked={instant} disabled={!!busy} onChange={e => setInstant(e.target.checked)} />Hiện đáp án sau mỗi câu</label><Button variant="text" disabled={loadingSubjects || !!busy} icon={<RefreshCw className="icon" />} onClick={() => { setError(''); setReload(v => v + 1); }}>Tải lại môn học</Button></div>
+        {!loadingSubjects && !subjects.length && <p className="muted setup-hint">Chưa có môn học để luyện tập. Hãy thử tải lại danh sách.</p>}
+        {!session && <p className="muted setup-hint" role="status">{authState === 'connecting' || authState === 'waiting' ? (standalone ? 'Đang kiểm tra đăng nhập…' : 'Đang kết nối tài khoản từ AI-Portal…') : standalone ? 'Cần đăng nhập Microsoft NEU để làm bài và lưu kết quả.' : 'Cần kết nối phiên AI-Portal với ScoreUp để làm bài và lưu kết quả.'}</p>}
       </section>
-      <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted ? answers[q.id] === q.correct ? 'correct' : 'wrong' : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">Chọn số để chuyển đến câu hỏi.</p><Button full disabled={!!busy || !session || submitted} loading={busy === 'submit'} loadingText="Đang lưu kết quả…" icon={submitted ? <Check className="icon" /> : <Send className="icon" />} onClick={submit}>{submitted ? 'Đã lưu kết quả' : 'Nộp bài'}</Button></aside>
-    </div>}
+      <HistoryList session={session} subjects={subjects} loadingSubjects={loadingSubjects} drafts={drafts} busy={busy} version={historyVersion} onOpen={openReview} onResume={resume} onDeleteDraft={deleteDraft} onUnauthorized={expireSession} />
+    </>}
 
-    <dialog ref={submitDialog} className="confirm-dialog" onCancel={() => setSubmitConfirmOpen(false)} onClose={() => setSubmitConfirmOpen(false)} aria-labelledby="submit-confirm-title"><div className="confirm-icon"><Send className="icon-lg" /></div><h2 id="submit-confirm-title">Xác nhận nộp bài</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>Bạn có muốn nộp bài ngay bây giờ không?</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.</p></>}<div className="confirm-actions"><Button variant="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</Button><Button icon={<Send className="icon" />} onClick={confirmSubmit}>Xác nhận nộp</Button></div></dialog>
+    {view === 'review' && <>{notices}<ResultReview key={reviewId} session={session} resultId={reviewId} subjects={subjects} onBack={() => setView('home')} onRetry={retryQuestions} onUnauthorized={expireSession} /></>}
 
+    {view === 'exam' && batch && <>
+      <div className="panel exam-bar">
+        <Button variant="text" icon={<ArrowLeft className="icon" />} disabled={busy === 'submit'} onClick={leave}>Rời khỏi</Button>
+        <div className="exam-title"><span className="muted small">{submitted ? 'Đã nộp bài' : 'Đang làm bài'}</span><h2>{batch.subject.subject_name}</h2></div>
+        <span className="badge"><BookOpen className="icon" /> {sectionOf(batch)}</span>
+      </div>
+      {notices}
+      <div className="practice-layout">
+        <section className="question-list" aria-label="Các câu hỏi">
+          {submitted && <div className="notice success" role="status"><div><strong>Đã nộp · {correct}/{questions.length} câu đúng · {percent}%</strong><p>Đáp án và giải thích hiển thị bên dưới.</p></div><div className="notice-actions">{saved?._id && <Button variant="secondary" size="sm" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}<Button size="sm" icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button></div></div>}
+          {questions.map((q, i) => {
+            const reveal = submitted || (batch.instant && !!answers[q.id]);
+            return <article className="panel question" key={q.id} id={`question-${i}`}>
+              <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {i + 1}</span><span className="muted">{reveal ? answers[q.id] === q.correct ? '✓ Chính xác' : 'Cần ôn lại' : answers[q.id] ? 'Đã trả lời' : 'Chưa trả lời'}</span></div>
+              {q.context && <Markdown>{q.context}</Markdown>}<Markdown>{q.question}</Markdown>
+              {q.image && mediaUrl(q.image) && <img className="question-image" src={mediaUrl(q.image)} alt={`Hình minh họa câu ${i + 1}`} />}
+              {q.audio && mediaUrl(q.audio) && <audio controls src={mediaUrl(q.audio)} />}
+              {q.code && <pre><code>{q.code}</code></pre>}
+              {!submitted && <div className="ai-tutor"><Button variant="secondary" size="sm" disabled={!!busy} loading={!!hintBusy[q.id]} loadingText="Gia sư đang suy nghĩ…" icon={<Sparkles className="icon" />} onClick={() => requestHint(q)}>{hints[q.id] ? 'Hỏi gia sư gợi ý khác' : 'Gợi ý từ gia sư AI'}</Button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>Gợi ý học tập</strong></div><Markdown>{hints[q.id]}</Markdown><p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p></div>}</div>}
+              <fieldset className="options" disabled={!!busy || !session || submitted || (batch.instant && !!answers[q.id])}><legend className="sr-only">Đáp án câu {i + 1}</legend>{q.options.map(option => <label key={option.key} className={`option ${answers[q.id] === option.key ? 'selected' : ''} ${reveal && q.correct === option.key ? 'correct' : ''} ${reveal && answers[q.id] === option.key && q.correct !== option.key ? 'wrong' : ''}`}><input type="radio" name={`answer-${q.id}`} value={option.key} checked={answers[q.id] === option.key} onChange={() => setAnswers(current => ({ ...current, [q.id]: option.key }))} /><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown></label>)}</fieldset>
+              {reveal && <div className="explanation"><strong>Đáp án: {q.correct || 'Chưa có'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>}
+            </article>;
+          })}
+          {!submitted && <Button variant="secondary" full disabled={!!busy || !session} icon={<Sparkles className="icon" />} onClick={() => start(true)}>Làm tiếp · thêm {count} câu</Button>}
+        </section>
+        <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted ? answers[q.id] === q.correct ? 'correct' : 'wrong' : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">{submitted ? 'Chọn số để xem lại từng câu.' : draftSave === 'saving' ? 'Đang lưu nháp…' : draftSave === 'saved' ? `Đã lưu nháp${draftStore?.mode === 'server' ? ' vào tài khoản' : ' trên trình duyệt này'}.` : draftSave === 'error' ? 'Chưa lưu được nháp — sẽ thử lại khi bạn trả lời tiếp.' : 'Bài làm được tự lưu nháp khi bạn trả lời.'}</p><Button full disabled={!!busy || !session || submitted} loading={busy === 'submit'} loadingText="Đang lưu kết quả…" icon={submitted ? <Check className="icon" /> : <Send className="icon" />} onClick={submit}>{submitted ? 'Đã nộp bài' : 'Nộp bài'}</Button></aside>
+      </div>
+    </>}
+
+    <Modal open={submitConfirmOpen} onClose={() => setSubmitConfirmOpen(false)} labelledBy="submit-confirm-title"><div className="confirm-icon"><Send className="icon-lg" /></div><h2 id="submit-confirm-title">Xác nhận nộp bài</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>Bạn có muốn nộp bài ngay bây giờ không?</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.</p></>}<div className="confirm-actions"><Button variant="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</Button><Button icon={<Send className="icon" />} onClick={confirmSubmit}>Xác nhận nộp</Button></div></Modal>
+
+    <Modal open={leaveOpen} onClose={() => setLeaveOpen(false)} labelledBy="leave-title"><div className="confirm-icon"><Save className="icon-lg" /></div><h2 id="leave-title">Rời khỏi bài làm?</h2><p>Bạn đã làm <strong>{answered}/{questions.length} câu</strong>. Bài sẽ được lưu ở mục <strong>Chưa nộp</strong> trong Lịch sử làm bài để bạn làm tiếp sau.</p><div className="confirm-actions"><Button variant="secondary" disabled={busy === 'leave'} onClick={() => setLeaveOpen(false)}>Ở lại làm bài</Button><Button icon={<LogOut className="icon" />} loading={busy === 'leave'} loadingText="Đang lưu…" onClick={confirmLeave}>Lưu và rời khỏi</Button></div></Modal>
+
+    <Modal open={successOpen} onClose={() => setSuccessOpen(false)} labelledBy="success-title" className="success-dialog"><ScoreRing percent={percent} size="lg" /><h2 id="success-title">Nộp bài thành công!</h2><p>{batch?.subject?.subject_name} · {sectionOf(batch)}</p><p>Bạn trả lời đúng <strong>{correct}/{questions.length} câu</strong>. Kết quả đã được lưu vào tài khoản ScoreUp.</p><div className="confirm-actions">{saved?._id && <Button variant="secondary" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}<Button icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button></div><Button variant="text" className="dialog-dismiss" onClick={() => setSuccessOpen(false)}>Xem đáp án tại đây</Button></Modal>
   </main>;
 }
