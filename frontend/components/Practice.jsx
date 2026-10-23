@@ -8,7 +8,7 @@ import { BookOpen, Check, CheckCircle2, CircleHelp, Clock3, GraduationCap, Refre
 import { BookOpen as BookOpenData, Check as CheckData, CircleHelp as CircleHelpData, GraduationCap as GraduationCapData, RefreshCw as RefreshCwData, Send as SendData, X as XData } from 'lucide';
 import { mediaUrl, request } from '../lib/api.mjs';
 import { chapterName, parseQuestion, resultPayload, unwrap } from '../lib/practice.mjs';
-import { loadPortalScoreupSession, loadPortalUser, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
+import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
 import { clearStandaloneSession, isStandalone, loadStandaloneSession, microsoftLoginUrl } from '../lib/microsoft-auth.mjs';
@@ -122,14 +122,14 @@ export default function Practice() {
     setSession(null);
     setAuthError('');
     setAuthState('connecting');
-    loadPortalScoreupSession({ path: SESSION_PATH, signal: controller.signal }).then(value => {
+    loadScoreupSessionFromPortal({ path: SESSION_PATH, signal: controller.signal }).then(value => {
       if (controller.signal.aborted || generation !== authGeneration.current) return;
       setSession(value);
       setAuthState('ready');
     }).catch(e => {
       if (generation !== authGeneration.current || (controller.signal.aborted && controller.signal.reason?.name !== 'TimeoutError')) return;
       setAuthState('error');
-      setAuthError(!SESSION_PATH ? 'Đã nhận tài khoản AI-Portal. Kết nối SSO với ScoreUp chưa được thiết lập.' : controller.signal.aborted ? 'Kết nối phiên quá lâu. Hãy thử kết nối lại.' : e.message);
+      setAuthError(controller.signal.aborted ? 'Kết nối phiên quá lâu. Hãy thử kết nối lại.' : e.message);
     }).finally(() => clearTimeout(timeout));
     return () => { clearTimeout(timeout); controller.abort(); };
   }, [portalUser?.id, authReload, standalone]);

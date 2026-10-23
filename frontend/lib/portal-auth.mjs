@@ -60,7 +60,55 @@ export async function loadPortalScoreupSession({ path, signal, win = window }) {
   }
   const token = unwrap(data)?.token;
   if (typeof token !== 'string' || !token.trim()) throw new Error('Endpoint SSO chưa trả về token ScoreUp hợp lệ.');
+  return withScoreupUser(token, signal);
+}
+
+async function withScoreupUser(token, signal) {
   const user = unwrap(await request('/user/info', { token, signal }));
   if (!user?._id && !user?.id) throw new Error('Không tải được tài khoản ScoreUp liên kết.');
   return { token, user };
+}
+
+/**
+ * Dự phòng khi Portal chưa có endpoint SSO: dùng access token Microsoft trong phiên Portal
+ * (user đăng nhập Portal bằng Microsoft). ScoreUp xác minh token với Microsoft Graph, kiểm
+ * đúng tenant + app Azure, rồi cấp token ScoreUp. Token Microsoft chỉ dùng cho lần đổi này.
+ */
+export async function loadPortalMicrosoftSession({ signal, win = window }) {
+  const response = await fetch(new URL(portalApiPath('/api/auth/session', win), win.location.origin).href, {
+    credentials: 'same-origin', cache: 'no-store', signal,
+  });
+  const data = response.ok ? await response.json().catch(() => null) : null;
+  if (!data?.user) {
+    const error = new Error('Phiên AI-Portal đã hết hạn. Hãy mở lại công cụ từ Portal.');
+    error.status = 401;
+    throw error;
+  }
+  if (typeof data.accessToken !== 'string' || !data.accessToken) {
+    throw new Error('Hãy đăng nhập AI-Portal bằng tài khoản Microsoft NEU để dùng ScorePlus.');
+  }
+  let result;
+  try {
+    result = await request('/auth/microsoft/token', { body: { accessToken: data.accessToken }, signal });
+  } catch (e) {
+    if (e.status === 401) {
+      const error = new Error('Phiên Microsoft trên AI-Portal đã hết hạn. Hãy đăng xuất và đăng nhập lại AI-Portal.');
+      error.status = 401;
+      throw error;
+    }
+    throw e;
+  }
+  const token = unwrap(result)?.token;
+  if (typeof token !== 'string' || !token) throw new Error('ScoreUp không trả về token đăng nhập.');
+  return withScoreupUser(token, signal);
+}
+
+/** Endpoint SSO của Portal trước; Portal chưa có (404/5xx/chưa cấu hình) thì dùng token Microsoft. */
+export async function loadScoreupSessionFromPortal({ path, signal, win = window }) {
+  try {
+    return await loadPortalScoreupSession({ path, signal, win });
+  } catch (e) {
+    if (e.status === 401 || e.name === 'AbortError' || signal?.aborted) throw e;
+    return loadPortalMicrosoftSession({ signal, win });
+  }
 }
