@@ -7,7 +7,7 @@
     "node": ">=20.9.0"
   },
   "scripts": {
-    "dev": "next dev -p 3010",
+    "dev": "next dev -p 3000",
     "build": "next build --webpack",
     "pack": "npm run build && node scripts/pack.mjs",
     "pack:neu": "PORTAL_BASE_PATH=/apps NEXT_PUBLIC_SCOREUP_API_URL=https://fit.neu.edu.vn/scoreup/v1/api NEXT_PUBLIC_SCOREUP_MEDIA_URL=https://fit.neu.edu.vn/scoreup/media/ npm run pack",

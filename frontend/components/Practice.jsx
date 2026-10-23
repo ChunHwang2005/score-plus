@@ -4,11 +4,14 @@ import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MorphIcon } from 'morphicons/react';
-import { BookOpen, Check, CheckCircle2, CircleHelp, Clock3, GraduationCap, LoaderCircle, RefreshCw, Send, Sparkles, X } from 'lucide-react';
+import { BookOpen, Check, CheckCircle2, CircleHelp, Clock3, GraduationCap, RefreshCw, Send, Sparkles, X } from 'lucide-react';
 import { BookOpen as BookOpenData, Check as CheckData, CircleHelp as CircleHelpData, GraduationCap as GraduationCapData, RefreshCw as RefreshCwData, Send as SendData, X as XData } from 'lucide';
 import { mediaUrl, request } from '../lib/api.mjs';
 import { chapterName, parseQuestion, resultPayload, unwrap } from '../lib/practice.mjs';
 import { loadPortalScoreupSession, loadPortalUser, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
+import Button from './Button';
+import Dropdown from './Dropdown';
+import { clearStandaloneSession, isStandalone, loadStandaloneSession, microsoftLoginUrl } from '../lib/microsoft-auth.mjs';
 
 // Endpoint SSO của AI-Portal (backend routes/scoreplus.ts); env chỉ dùng khi Portal đặt endpoint ở path khác.
 const SESSION_PATH = process.env.NEXT_PUBLIC_PORTAL_SCOREUP_SESSION_PATH || '/api/scoreplus/session';
@@ -45,6 +48,8 @@ export default function Practice() {
   const [authState, setAuthState] = useState('waiting');
   const [authError, setAuthError] = useState('');
   const [authReload, setAuthReload] = useState(0);
+  // Chạy riêng (không nằm dưới /embed/scoreplus của Portal) → đăng nhập Microsoft như ScoreUp.
+  const [standalone, setStandalone] = useState(false);
   const portalIdentity = useRef(null);
   const authGeneration = useRef(0);
   const [reload, setReload] = useState(0);
@@ -58,6 +63,24 @@ export default function Practice() {
   useEffect(() => {
     const theme = new URLSearchParams(window.location.search).get('theme');
     if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme;
+    if (isStandalone(window)) {
+      setStandalone(true);
+      const controller = new AbortController();
+      setAuthState('connecting');
+      loadStandaloneSession({ signal: controller.signal }).then(value => {
+        if (controller.signal.aborted) return;
+        if (!value) { setSession(null); setPortalUser(null); setAuthState('signed-out'); return; }
+        authGeneration.current += 1;
+        setSession(value);
+        setPortalUser({ id: String(value.user._id || value.user.id), email: value.user.email || '', name: value.user.fullName || value.user.name || '' });
+        setAuthState('ready');
+      }).catch(e => {
+        if (controller.signal.aborted) return;
+        setAuthState('signed-out');
+        setAuthError(e.message);
+      });
+      return () => controller.abort();
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), 15000);
     let revision = 0;
@@ -92,7 +115,7 @@ export default function Practice() {
   }, [authReload]);
 
   useEffect(() => {
-    if (!portalUser) return;
+    if (!portalUser || standalone) return;
     const controller = new AbortController();
     const generation = ++authGeneration.current;
     const timeout = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), 30000);
@@ -109,9 +132,28 @@ export default function Practice() {
       setAuthError(!SESSION_PATH ? 'Đã nhận tài khoản AI-Portal. Kết nối SSO với ScoreUp chưa được thiết lập.' : controller.signal.aborted ? 'Kết nối phiên quá lâu. Hãy thử kết nối lại.' : e.message);
     }).finally(() => clearTimeout(timeout));
     return () => { clearTimeout(timeout); controller.abort(); };
-  }, [portalUser?.id, authReload]);
+  }, [portalUser?.id, authReload, standalone]);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  // Liquid glass: ánh sáng trên bề mặt kính đi theo con trỏ (CSS đọc --mx/--my).
+  useEffect(() => {
+    if (!window.matchMedia('(pointer: fine)').matches || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    let frame = 0;
+    const onMove = event => {
+      // Nút và dropdown tự xử lý trong components/Button.jsx, Dropdown.jsx.
+      const el = event.target.closest?.('.panel,.account,.option,.palette a');
+      if (!el || frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const rect = el.getBoundingClientRect();
+        el.style.setProperty('--mx', `${event.clientX - rect.left}px`);
+        el.style.setProperty('--my', `${event.clientY - rect.top}px`);
+      });
+    };
+    document.addEventListener('pointermove', onMove, { passive: true });
+    return () => { document.removeEventListener('pointermove', onMove); cancelAnimationFrame(frame); };
+  }, []);
 
   function notify(kind, title, message) {
     clearTimeout(toastTimer.current);
@@ -138,6 +180,20 @@ export default function Practice() {
     else if (!submitConfirmOpen) submitDialog.current?.close();
   }, [submitConfirmOpen]);
 
+  function signIn() {
+    try { window.location.assign(microsoftLoginUrl()); }
+    catch (e) { setAuthError(e.message); }
+  }
+
+  function signOut() {
+    clearStandaloneSession();
+    authGeneration.current += 1;
+    setSession(null); setPortalUser(null);
+    setQuestions([]); setAnswers({}); setBatch(null); setSaved(null); setSubmitted(false);
+    setHints({}); setHintBusy({}); setSubmitConfirmOpen(false);
+    setAuthError(''); setAuthState('signed-out');
+  }
+
   async function run(name, action) {
     if (actionLock.current) return;
     const generation = authGeneration.current;
@@ -151,8 +207,14 @@ export default function Practice() {
       if (e.status === 401) {
         setSession(null);
         authGeneration.current += 1;
-        setAuthState('error');
-        setAuthError('Phiên kết nối đã hết hạn. Hãy thử kết nối lại hoặc mở lại công cụ từ AI-Portal.');
+        if (standalone) {
+          clearStandaloneSession();
+          setAuthState('signed-out');
+          setAuthError('Phiên ScoreUp đã hết hạn. Hãy đăng nhập lại.');
+        } else {
+          setAuthState('error');
+          setAuthError('Phiên kết nối đã hết hạn. Hãy thử kết nối lại hoặc mở lại công cụ từ AI-Portal.');
+        }
       }
     } finally { actionLock.current = false; setBusy(''); }
   }
@@ -252,26 +314,28 @@ export default function Practice() {
   }
 
   return <main className="workspace">
+    <div className="liquid-bg" aria-hidden="true"><span /><span /><span /><span /></div>
     {toast && <div className="toast-region" aria-live="polite" aria-atomic="true"><div key={toast.id} className={`toast ${toast.kind}`}><span className="toast-icon">{toast.kind === 'success' ? <CheckCircle2 className="icon" /> : <CircleHelp className="icon" />}</span><div className="toast-copy"><strong>{toast.title}</strong><p>{toast.message}</p></div><button className="toast-close" aria-label="Đóng thông báo" onClick={() => setToast(null)}><X className="icon" /></button></div></div>}
     <header className="page-heading">
       <div className="title-block"><div className="eyebrow"><GraduationCap className="icon" /> SCOREPLUS <span>/</span> HỌC TẬP</div><h1>Luyện tập</h1><p>Ôn luyện theo môn học, củng cố kiến thức qua từng câu hỏi.</p></div>
-      <div className="account" aria-live="polite"><span>{portalUser?.name || portalUser?.email || 'AI-Portal'}</span><span className="muted small">{authState === 'ready' ? 'Đã kết nối' : authState === 'connecting' ? 'Đang kết nối…' : authState === 'waiting' ? 'Đang nhận tài khoản…' : 'Chưa kết nối ScoreUp'}</span></div>
+      <div className="account" aria-live="polite"><span className="avatar" aria-hidden="true">{(portalUser?.name || portalUser?.email || (standalone ? 'S' : 'A')).trim().charAt(0).toUpperCase()}</span><div className="account-text"><span>{portalUser?.name || portalUser?.email || (standalone ? 'ScoreUp' : 'AI-Portal')}</span><span className={`muted small account-status ${authState}`}>{authState === 'ready' ? 'Đã kết nối' : authState === 'connecting' ? 'Đang kết nối…' : authState === 'waiting' ? 'Đang nhận tài khoản…' : authState === 'signed-out' ? 'Chưa đăng nhập' : 'Chưa kết nối ScoreUp'}</span>{standalone && authState === 'ready' && <Button variant="text" disabled={!!busy} onClick={signOut}>Đăng xuất</Button>}</div></div>
     </header>
 
-    {authError && <div className="notice error" role="alert"><span>{authError}</span><button className="text-button" disabled={!!busy || authState === 'connecting'} onClick={() => { setAuthError(''); setAuthState('waiting'); setAuthReload(v => v + 1); }}>Kết nối lại</button></div>}
-    {error && <div className="notice error" role="alert"><span>{error}</span><button className="text-button" onClick={() => setError('')}>Đóng</button></div>}
+    {standalone && authState === 'signed-out' && <div className="notice" role="status"><span>Đăng nhập bằng tài khoản Microsoft NEU để làm bài và lưu kết quả.</span><Button onClick={signIn}>Đăng nhập với Microsoft (NEU)</Button></div>}
+    {authError && <div className="notice error" role="alert"><span>{authError}</span>{!standalone && <Button variant="text" disabled={!!busy || authState === 'connecting'} onClick={() => { setAuthError(''); setAuthState('waiting'); setAuthReload(v => v + 1); }}>Kết nối lại</Button>}</div>}
+    {error && <div className="notice error" role="alert"><span>{error}</span><Button variant="text" onClick={() => setError('')}>Đóng</Button></div>}
     <section className="panel filters" aria-labelledby="filter-title">
       <div className="panel-heading"><h2 id="filter-title">Thiết lập luyện tập</h2><span className="muted">Chọn nội dung bạn muốn ôn luyện</span></div>
       <div className="filter-grid">
-        <label>Môn học<select value={subjectId} disabled={loadingSubjects || !!busy} onChange={e => { setSubjectId(e.target.value); setChapter(''); }}><option value="" disabled>{loadingSubjects ? 'Đang tải môn học…' : 'Chọn môn học'}</option>{subjects.map(s => <option key={s._id} value={s._id}>{s.subject_name}</option>)}</select></label>
-        <label>Chương / Nội dung<select value={chapter} onChange={e => setChapter(e.target.value)} disabled={!subject || !!busy}><option value="">Ngẫu nhiên toàn môn</option>{(subject?.chapters || []).map((c, i) => { const id = typeof c === 'string' ? c : c.chapter; return id ? <option key={`${id}-${i}`} value={id}>{chapterName(id)}</option> : null; })}</select></label>
-        <label>Số câu hỏi<select value={count} disabled={!!busy} onChange={e => setCount(Number(e.target.value))}>{[5, 10, 15, 20, 30, 50].map(n => <option key={n} value={n}>{n} câu</option>)}</select></label>
-        <button className="primary start" disabled={!subject || !!busy || !session} onClick={() => start()}>{busy === 'questions' ? <><LoaderCircle className="icon spin" /> Đang lấy câu hỏi…</> : <><Sparkles className="icon" /> {questions.length ? 'Bắt đầu lượt mới' : 'Bắt đầu luyện tập'}</>}</button>
+        <Dropdown label="Môn học" value={subjectId} disabled={loadingSubjects || !!busy} placeholder={loadingSubjects ? 'Đang tải môn học…' : 'Chọn môn học'} options={subjects.map(s => ({ value: s._id, label: s.subject_name }))} onChange={value => { setSubjectId(value); setChapter(''); }} />
+        <Dropdown label="Chương / Nội dung" value={chapter} disabled={!subject || !!busy} onChange={setChapter} options={[{ value: '', label: 'Ngẫu nhiên toàn môn' }, ...(subject?.chapters || []).map(c => (typeof c === 'string' ? c : c.chapter)).filter(Boolean).map(id => ({ value: id, label: chapterName(id) }))]} />
+        <Dropdown label="Số câu hỏi" value={count} disabled={!!busy} onChange={setCount} options={[5, 10, 15, 20, 30, 50].map(n => ({ value: n, label: `${n} câu` }))} />
+        <Button className="start" disabled={!subject || !!busy || !session} loading={busy === 'questions'} loadingText="Đang lấy câu hỏi…" icon={<Sparkles className="icon" />} onClick={() => start()}>{questions.length ? 'Bắt đầu lượt mới' : 'Bắt đầu luyện tập'}</Button>
       </div>
-      <div className="filter-footer"><label className="checkbox"><input type="checkbox" checked={instant} disabled={!!busy} onChange={e => setInstant(e.target.checked)} />Hiện đáp án sau mỗi câu <span className="muted">(áp dụng cho lượt mới)</span></label><button className="text-button" disabled={loadingSubjects || !!busy} onClick={() => { setError(''); setReload(v => v + 1); }}><RefreshCw className="icon" /> Tải lại môn học</button></div>
+      <div className="filter-footer"><label className="checkbox"><input type="checkbox" checked={instant} disabled={!!busy} onChange={e => setInstant(e.target.checked)} />Hiện đáp án sau mỗi câu <span className="muted">(áp dụng cho lượt mới)</span></label><Button variant="text" disabled={loadingSubjects || !!busy} icon={<RefreshCw className="icon" />} onClick={() => { setError(''); setReload(v => v + 1); }}>Tải lại môn học</Button></div>
     </section>
 
-    {!questions.length ? <section className="panel empty"><div className="book-icon" aria-hidden="true"><Icon name="book" size={30} className="icon-lg" /></div><h2>{loadingSubjects ? 'Đang tải môn học…' : 'Sẵn sàng cho buổi luyện tập?'}</h2><p>Chọn môn học và số câu hỏi, sau đó bắt đầu.<br />Bạn có thể luyện ngẫu nhiên hoặc tập trung vào từng chương.</p>{!loadingSubjects && !subjects.length && <p>Chưa có môn học để luyện tập. Hãy thử tải lại danh sách.</p>}{!session && <p className="muted" role="status">{authState === 'connecting' || authState === 'waiting' ? 'Đang kết nối tài khoản từ AI-Portal…' : 'Cần kết nối phiên AI-Portal với ScoreUp để làm bài và lưu kết quả.'}</p>}</section> : <div className="practice-layout">
+    {!questions.length ? <section className="panel empty"><div className="book-icon" aria-hidden="true"><Icon name="book" size={30} className="icon-lg" /></div><h2>{loadingSubjects ? 'Đang tải môn học…' : 'Sẵn sàng cho buổi luyện tập?'}</h2><p>Chọn môn học và số câu hỏi, sau đó bắt đầu.<br />Bạn có thể luyện ngẫu nhiên hoặc tập trung vào từng chương.</p>{!loadingSubjects && !subjects.length && <p>Chưa có môn học để luyện tập. Hãy thử tải lại danh sách.</p>}{!session && <p className="muted" role="status">{authState === 'connecting' || authState === 'waiting' ? (standalone ? 'Đang kiểm tra đăng nhập…' : 'Đang kết nối tài khoản từ AI-Portal…') : standalone ? 'Cần đăng nhập Microsoft NEU để làm bài và lưu kết quả.' : 'Cần kết nối phiên AI-Portal với ScoreUp để làm bài và lưu kết quả.'}</p>}</section> : <div className="practice-layout">
       <section className="question-list" aria-label="Các câu hỏi">
         <div className="learning-heading"><div><span className="muted">Bạn đang học</span><h2>{batch.subject.subject_name}</h2></div><span className="badge"><BookOpen className="icon" /> {batch.chapter ? chapterName(batch.chapter) : 'Luyện ngẫu nhiên'}</span></div>
         {submitted && <div className="notice success" role="status"><div><strong>Hoàn thành! {correct}/{questions.length} câu đúng · {Math.round(correct / questions.length * 100)}%</strong><p>Kết quả đã được lưu vào tài khoản ScoreUp.{saved?._id ? ` Mã kết quả: ${saved._id}` : ''}</p></div></div>}
@@ -283,17 +347,17 @@ export default function Practice() {
             {q.image && mediaUrl(q.image) && <img className="question-image" src={mediaUrl(q.image)} alt={`Hình minh họa câu ${i + 1}`} />}
             {q.audio && mediaUrl(q.audio) && <audio controls src={mediaUrl(q.audio)} />}
             {q.code && <pre><code>{q.code}</code></pre>}
-            {!submitted && <div className="ai-tutor"><button type="button" className="secondary ai-hint-button" disabled={!!busy || hintBusy[q.id]} onClick={() => requestHint(q)}>{hintBusy[q.id] ? <><LoaderCircle className="icon spin" /> Gia sư đang suy nghĩ…</> : <><Sparkles className="icon" /> {hints[q.id] ? 'Hỏi gia sư gợi ý khác' : 'Gợi ý từ gia sư AI'}</>}</button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>Gợi ý học tập</strong></div><Markdown>{hints[q.id]}</Markdown><p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p></div>}</div>}
+            {!submitted && <div className="ai-tutor"><Button variant="secondary" size="sm" disabled={!!busy} loading={!!hintBusy[q.id]} loadingText="Gia sư đang suy nghĩ…" icon={<Sparkles className="icon" />} onClick={() => requestHint(q)}>{hints[q.id] ? 'Hỏi gia sư gợi ý khác' : 'Gợi ý từ gia sư AI'}</Button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>Gợi ý học tập</strong></div><Markdown>{hints[q.id]}</Markdown><p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p></div>}</div>}
             <fieldset className="options" disabled={!!busy || !session || submitted || (batch.instant && !!answers[q.id])}><legend className="sr-only">Đáp án câu {i + 1}</legend>{q.options.map(option => <label key={option.key} className={`option ${answers[q.id] === option.key ? 'selected' : ''} ${reveal && q.correct === option.key ? 'correct' : ''} ${reveal && answers[q.id] === option.key && q.correct !== option.key ? 'wrong' : ''}`}><input type="radio" name={`answer-${q.id}`} value={option.key} checked={answers[q.id] === option.key} onChange={() => setAnswers(current => ({ ...current, [q.id]: option.key }))} /><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown></label>)}</fieldset>
             {reveal && <div className="explanation"><strong>Đáp án: {q.correct || 'Chưa có'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>}
           </article>;
         })}
-        {!submitted && <button className="secondary full" disabled={!!busy || !session} onClick={() => start(true)}><Sparkles className="icon" /> Làm tiếp · thêm {count} câu</button>}
+        {!submitted && <Button variant="secondary" full disabled={!!busy || !session} icon={<Sparkles className="icon" />} onClick={() => start(true)}>Làm tiếp · thêm {count} câu</Button>}
       </section>
-      <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted ? answers[q.id] === q.correct ? 'correct' : 'wrong' : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">Chọn số để chuyển đến câu hỏi.</p><button className="primary full" disabled={!!busy || !session || submitted} onClick={submit}>{busy === 'submit' ? <><LoaderCircle className="icon spin" /> Đang lưu kết quả…</> : submitted ? <><Check className="icon" /> Đã lưu kết quả</> : <><Send className="icon" /> Nộp bài</>}</button></aside>
+      <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted ? answers[q.id] === q.correct ? 'correct' : 'wrong' : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">Chọn số để chuyển đến câu hỏi.</p><Button full disabled={!!busy || !session || submitted} loading={busy === 'submit'} loadingText="Đang lưu kết quả…" icon={submitted ? <Check className="icon" /> : <Send className="icon" />} onClick={submit}>{submitted ? 'Đã lưu kết quả' : 'Nộp bài'}</Button></aside>
     </div>}
 
-    <dialog ref={submitDialog} className="confirm-dialog" onCancel={() => setSubmitConfirmOpen(false)} onClose={() => setSubmitConfirmOpen(false)} aria-labelledby="submit-confirm-title"><div className="confirm-icon"><Send className="icon-lg" /></div><h2 id="submit-confirm-title">Xác nhận nộp bài</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>Bạn có muốn nộp bài ngay bây giờ không?</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.</p></>}<div className="confirm-actions"><button type="button" className="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</button><button type="button" className="primary" onClick={confirmSubmit}><Send className="icon" /> Xác nhận nộp</button></div></dialog>
+    <dialog ref={submitDialog} className="confirm-dialog" onCancel={() => setSubmitConfirmOpen(false)} onClose={() => setSubmitConfirmOpen(false)} aria-labelledby="submit-confirm-title"><div className="confirm-icon"><Send className="icon-lg" /></div><h2 id="submit-confirm-title">Xác nhận nộp bài</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>Bạn có muốn nộp bài ngay bây giờ không?</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.</p></>}<div className="confirm-actions"><Button variant="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</Button><Button icon={<Send className="icon" />} onClick={confirmSubmit}>Xác nhận nộp</Button></div></dialog>
 
   </main>;
 }

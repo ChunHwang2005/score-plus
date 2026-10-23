@@ -6,7 +6,11 @@ export default (phase) => ({
   ...(phase === PHASE_DEVELOPMENT_SERVER
     ? {
         async redirects() {
-          return [{ source: `${portalBasePath}/embed/scoreplus`, destination: '/', permanent: false }];
+          return [
+            { source: `${portalBasePath}/embed/scoreplus`, destination: '/', permanent: false },
+            // Redirect URI Azure đã đăng ký sẵn (giống ScoreUp); query ?code&state được giữ nguyên khi chuyển về trang chính.
+            { source: '/api/auth/callback/azure-ad', destination: '/', permanent: false },
+          ];
         },
       }
     : { output: 'export', basePath: `${portalBasePath}/embed/scoreplus` }),

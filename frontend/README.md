@@ -14,9 +14,9 @@ test -f .env.local || cp .env.example .env.local
 npm run dev
 ```
 
-Mở http://localhost:3010/ . Chế độ dev chạy ở đường dẫn gốc; link cũ `/embed/scoreplus/` sẽ chuyển về `/`. Khi build/pack, ứng dụng vẫn dùng `/embed/scoreplus/` cho AI Portal. Sau khi thay đổi `next.config.mjs`, hãy dừng và chạy lại `npm run dev`.
+Mở http://localhost:3000/ . Chế độ dev chạy ở đường dẫn gốc; link cũ `/embed/scoreplus/` sẽ chuyển về `/`. Khi build/pack, ứng dụng vẫn dùng `/embed/scoreplus/` cho AI Portal. Sau khi thay đổi `next.config.mjs`, hãy dừng và chạy lại `npm run dev`.
 
-`.env.example` mặc định gọi BE local tại `http://localhost:3006/v1/api`. Nếu dùng server ScoreUp có sẵn, chỉnh `.env.local` theo mục bên dưới. Không copy đè `.env.local` đã cấu hình. API danh sách môn trên server đã được kiểm tra trả HTTP 200, nhưng preflight từ `http://localhost:3010` chưa có `Access-Control-Allow-Origin`: quản trị BE cần thêm origin local/Portal vào CORS trước khi trình duyệt gọi được.
+`.env.example` mặc định gọi BE local tại `http://localhost:3006/v1/api`. Nếu dùng server ScoreUp có sẵn, chỉnh `.env.local` theo mục bên dưới. Không copy đè `.env.local` đã cấu hình. API danh sách môn trên server đã được kiểm tra trả HTTP 200, nhưng preflight từ `http://localhost:3000` chưa có `Access-Control-Allow-Origin`: quản trị BE cần thêm origin local/Portal vào CORS trước khi trình duyệt gọi được.
 
 ## Kết nối ScoreUp
 
@@ -30,7 +30,7 @@ PORTAL_BASE_PATH=
 
 URL trên là ví dụ theo cấu hình ScoreUp trong workspace; cần xác nhận URL media thực tế của môi trường triển khai. Các biến `NEXT_PUBLIC_*` là công khai, được nhúng lúc build; thay đổi URL cần build và upload lại. Không đặt mật khẩu, token hoặc secret vào các biến này.
 
-BE ScoreUp phải cho phép origin của Portal (và `http://localhost:3010` khi dev) trong `CORS_ALLOWED_ORIGINS`, ví dụ `https://portal.example.com,http://localhost:3010`. Origin không chứa path. Request dùng Bearer, không dùng cookie xuyên domain. Khi Portal chạy HTTPS, API và media cũng cần HTTPS.
+BE ScoreUp phải cho phép origin của Portal (và `http://localhost:3000` khi dev) trong `CORS_ALLOWED_ORIGINS`, ví dụ `https://portal.example.com,http://localhost:3000`. Origin không chứa path. Request dùng Bearer, không dùng cookie xuyên domain. Khi Portal chạy HTTPS, API và media cũng cần HTTPS.
 
 Các API được sử dụng (đã đối chiếu source ScoreUp):
 
@@ -46,6 +46,12 @@ Các API được sử dụng (đã đối chiếu source ScoreUp):
 User context của Portal không phải token ScoreUp. Để làm bài/lưu kết quả, ScorePlus gọi endpoint SSO **backend** của AI-Portal `GET /api/scoreplus/session` (mặc định; đổi bằng `NEXT_PUBLIC_PORTAL_SCOREUP_SESSION_PATH`, path bắt đầu bằng `/`, không chứa base path). Endpoint (`AI-Portal/backend/src/routes/scoreplus.ts`) xác thực cookie phiên Portal, rồi gọi server-to-server ScoreUp `POST /v1/api/auth/portal` kèm header `x-portal-sso-secret`; ScoreUp tìm/tạo user theo email và cấp Bearer token. Cấu hình: AI-Portal `SCOREUP_API_URL` + `SCOREUP_PORTAL_SSO_SECRET`, ScoreUp `PORTAL_SSO_SECRET` (hai secret phải trùng nhau). Frontend không gửi email/id để thay thế xác thực. Lưu ý: ScoreUp chỉ giữ một token mỗi user, nên mở ScorePlus sẽ đăng xuất phiên ScoreUp web của cùng tài khoản (giống đăng nhập lại).
 
 Frontend gọi `GET` endpoint với `credentials: same-origin`, `cache: no-store`; response cần là `{ metadata: { token: "..." } }` hoặc `{ token: "..." }`. Sau đó gọi ScoreUp `/user/info` để xác thực token. Token chỉ giữ trong bộ nhớ; mỗi lần mở lại sẽ lấy phiên mới. Không dùng token OAuth Microsoft/Google thay cho token ScoreUp. Khi endpoint lỗi hoặc Portal chưa cấu hình, tài khoản Portal vẫn hiển thị nhưng thao tác làm bài bị khóa kèm thông báo lỗi. Nút “Kết nối lại” lấy lại phiên từ Portal. Đổi tài khoản sẽ xóa lượt bài cũ để không lưu nhầm người dùng.
+
+## Chạy riêng (không qua Portal)
+
+Khi mở ScorePlus ngoài đường dẫn `/embed/scoreplus` của Portal và không nằm trong iframe (vd. `npm run dev` tại http://localhost:3000/), app hiện nút **Đăng nhập với Microsoft (NEU)** và đăng nhập giống ScoreUp: chuyển sang Microsoft (Web code flow, cùng app Azure), nhận `code` tại redirect URI rồi gửi ScoreUp `POST /auth/microsoft/code` để BE ScoreUp đổi lấy token (BE dùng `APP_SECRET`, frontend không giữ secret). Token giữ trong `sessionStorage` của tab để reload không phải đăng nhập lại; nút “Đăng xuất” xoá token.
+
+Cấu hình trong `.env.local`: `NEXT_PUBLIC_MICROSOFT_CLIENT_ID`, `NEXT_PUBLIC_MICROSOFT_TENANT_ID`, `NEXT_PUBLIC_MICROSOFT_REDIRECT_URI` (trống = `<origin>/`). Redirect URI phải được đăng ký trong Azure → Authentication → Web, khớp từng ký tự, nếu không Microsoft báo `AADSTS50011`. Local dùng URI đã đăng ký sẵn `http://localhost:3000/api/auth/callback/azure-ad` (dev server tự chuyển path này về `/` kèm `?code&state`). Cổng 3000 trùng AI-Portal và ScoreUp frontend khi dev: chỉ chạy một trong ba cùng lúc. Gợi ý AI dùng Central LLM của Portal nên không hoạt động khi chạy riêng.
 
 ## Đóng gói cho AI Portal
 
@@ -82,7 +88,7 @@ Tool có một route tĩnh; chọn môn/chương và làm bài bằng client sta
 - Nộp bài lưu đúng schema result ScoreUp; khóa nút khi request chạy và sau khi lưu thành công.
 - Responsive, hỗ trợ sáng/tối; thông báo lỗi mạng, phiên hết hạn, dữ liệu rỗng.
 
-Đây là tool luyện tập, không bao gồm quản trị đề, bình luận, chia sẻ bộ câu, hệ gợi ý thích nghi hoặc đăng nhập Microsoft. Chấm điểm phía client theo đáp án API, cùng cách trang luyện tập hiện tại; không dùng làm hệ thống thi bảo mật. Khi bắt đầu lượt mới, app xác nhận trước khi bỏ bài chưa nộp; khi Portal đổi tài khoản, lượt bài cũ bị xóa. Bài chưa nộp không được khôi phục sau khi refresh. Nếu mất mạng ngay sau nộp, BE chưa có idempotency key nên cần kiểm tra lịch sử ScoreUp trước khi thử lại để tránh bản ghi trùng.
+Đây là tool luyện tập, không bao gồm quản trị đề, bình luận, chia sẻ bộ câu, hệ gợi ý thích nghi hoặc đăng nhập Microsoft khi chạy trong Portal (tài khoản lấy từ Portal). Chấm điểm phía client theo đáp án API, cùng cách trang luyện tập hiện tại; không dùng làm hệ thống thi bảo mật. Khi bắt đầu lượt mới, app xác nhận trước khi bỏ bài chưa nộp; khi Portal đổi tài khoản, lượt bài cũ bị xóa. Bài chưa nộp không được khôi phục sau khi refresh. Nếu mất mạng ngay sau nộp, BE chưa có idempotency key nên cần kiểm tra lịch sử ScoreUp trước khi thử lại để tránh bản ghi trùng.
 
 ## Kiểm tra triển khai
 
