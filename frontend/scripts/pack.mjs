@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import AdmZip from 'adm-zip';
+const root = process.cwd();
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+if (manifest.alias !== 'scoreplus' || !manifest.hasFrontendOnly || manifest.hasBackend) throw new Error('Invalid Portal manifest');
+if (!fs.existsSync(path.join(root, 'out/index.html'))) throw new Error('Run npm run build first');
+const zip = new AdmZip();
+zip.addLocalFile(path.join(root, 'manifest.json'));
+zip.addLocalFolder(path.join(root, 'out'), 'public');
+const buffer = zip.toBuffer();
+if (buffer.length > 50 * 1024 * 1024) throw new Error('Portal limits packages to 50 MB');
+fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
+fs.writeFileSync(path.join(root, 'dist/scoreplus.zip'), buffer);
+console.log(`Created dist/scoreplus.zip (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
