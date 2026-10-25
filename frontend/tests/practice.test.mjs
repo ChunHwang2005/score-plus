@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { answerKey, formatDuration, historyStats, pageWindow, parseQuestion, resultPayload, resultSummary, reviewItems, unwrap } from '../lib/practice.mjs';
+import { answerKey, formatDuration, hintStatus, historyStats, pageWindow, parseQuestion, resultPayload, resultSummary, reviewItems, unwrap } from '../lib/practice.mjs';
 import { request } from '../lib/api.mjs';
 
 test('parses ScoreUp unified and legacy questions', () => {
@@ -71,4 +71,37 @@ test('pageWindow keeps first/last pages and collapses gaps', () => {
   assert.deepEqual(pageWindow(5, 10), [1, '…', 4, 5, 6, '…', 10]);
   assert.deepEqual(pageWindow(10, 10), [1, '…', 9, 10]);
   assert.deepEqual(pageWindow(3, 10), [1, 2, 3, 4, '…', 10]);
+});
+
+test('instant mode allows retries and scores the first attempt', async () => {
+  const { MAX_TRIES, questionDone, scoredAnswers } = await import('../lib/practice.mjs');
+  const q = { id: 'q1', correct: 'B' };
+  assert.equal(questionDone(q, 'A', ['A']), false); // sai lần đầu, còn lượt
+  assert.equal(questionDone(q, 'B', ['A', 'B']), true); // đúng ở lần 2
+  assert.equal(questionDone(q, 'C', ['A', 'D', 'C'].slice(0, MAX_TRIES)), true); // hết lượt → hiện đáp án
+  assert.equal(questionDone(q, '', []), false);
+  const questions = [q, { id: 'q2', correct: 'A' }, { id: 'q3', correct: 'A' }];
+  const answers = { q1: 'B', q2: 'A' };
+  const tries = { q1: ['A', 'B'], q2: ['A'] };
+  assert.deepEqual(scoredAnswers(questions, answers, tries, true), { q1: 'A', q2: 'A' });
+  assert.equal(scoredAnswers(questions, answers, tries, false), answers); // chế độ thường: lựa chọn cuối
+});
+
+test('hintStatus distinguishes used / unused / off / unknown', () => {
+  assert.deepEqual(hintStatus(true, 3), { kind: 'used', label: 'Đã dùng gợi ý (3)' });
+  assert.equal(hintStatus(true, 0).kind, 'unused');
+  assert.equal(hintStatus(false, 0).kind, 'off');
+  assert.equal(hintStatus(null, null), null);
+  assert.deepEqual([resultSummary({ hints_enabled: true, hints_used: 2 }).hintsEnabled, resultSummary({}).hintsUsed], [true, null]);
+});
+
+test('resultSummary leaves section empty when the result has no chapter (no "Luyện tập" placeholder)', () => {
+  assert.equal(resultSummary({ questions: [] }).section, '');
+  assert.equal(resultSummary({ questions: [{ section: 'Chương 3' }] }).section, 'Chương 3');
+});
+
+test('resultSummary reads the chapter from /questions/result/mine items (top-level section, no questions)', () => {
+  assert.equal(resultSummary({ _id: 'r1', section: 'Chương 4', total: 10, correct: 2 }).section, 'Chương 4');
+  assert.equal(resultSummary({ _id: 'r2', section: 'Luyện ngẫu nhiên' }).section, 'Luyện ngẫu nhiên');
+  assert.equal(resultSummary({ _id: 'r3', questions: [{ section: 'Chương 1' }] }).section, 'Chương 1'); // legacy / detail shape
 });

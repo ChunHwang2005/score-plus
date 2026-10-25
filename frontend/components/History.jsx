@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, BookOpen, CalendarClock, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleHelp, CircleX, History as HistoryIcon, LayoutGrid, ListChecks, Play, RefreshCw, RotateCcw, Rows3, Target, Timer, Trash2, Trophy } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, BookOpen, CalendarClock, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleHelp, CircleX, History as HistoryIcon, LayoutGrid, ListChecks, Play, RotateCcw, Rows3, Sparkles, Target, Timer, Trash2, Trophy } from 'lucide-react';
 import { mediaUrl, request } from '../lib/api.mjs';
-import { certificateIdOf, formatDateTime, formatDuration, historyStats, pageWindow, resultSummary, reviewItems, scoreTone, sectionOf, unwrap } from '../lib/practice.mjs';
+import { certificateIdOf, formatDateTime, formatDuration, hintStatus, historyStats, pageWindow, resultSummary, reviewItems, scoreTone, sectionOf, unwrap } from '../lib/practice.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
 import Markdown from './Markdown';
@@ -16,8 +16,19 @@ const FILTERS = [
 ];
 const STATUS_LABEL = { correct: '✓ Chính xác', wrong: 'Sai', skipped: 'Bỏ trống' };
 
+/** Vòng điểm kiểu kính: rãnh kính mờ + cung SVG dải màu theo mức điểm (đầu bo tròn, có quầng sáng) + lõi kính. */
 export function ScoreRing({ percent, size = 'md' }) {
-  return <div className={`score-ring ${size} tone-${scoreTone(percent)}`} style={{ '--p': percent }} role="img" aria-label={`Đạt ${percent}%`}><span>{percent}<small>%</small></span></div>;
+  const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  // useId có thể chứa ký tự không hợp lệ trong url(#…) → chỉ giữ chữ/số.
+  const gradient = `ring-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  return <div className={`score-ring ${size} tone-${scoreTone(value)}`} role="img" aria-label={`Đạt ${value}%`}>
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <defs><linearGradient id={gradient} x1="0" y1="0" x2="1" y2="1"><stop offset="0" className="ring-stop-a" /><stop offset="1" className="ring-stop-b" /></linearGradient></defs>
+      <circle className="ring-track" cx="50" cy="50" r="42" />
+      {value > 0 && <circle className="ring-arc" cx="50" cy="50" r="42" pathLength="100" stroke={`url(#${gradient})`} style={{ strokeDashoffset: 100 - value }} transform="rotate(-90 50 50)" />}
+    </svg>
+    <span className="ring-core"><span>{value}<small>%</small></span></span>
+  </div>;
 }
 
 /** Tải dữ liệu ScoreUp theo token; lỗi 401 được đẩy lên Practice để xử lý phiên. */
@@ -101,37 +112,48 @@ function readView() {
   try { return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'grid'; } catch { return 'grid'; }
 }
 
+function HintTag({ item }) {
+  if (!item.hint) return null;
+  return <span className={`hint-tag ${item.hint.kind}`} title="Sử dụng gợi ý từ gia sư AI trong lượt này"><Sparkles className="icon" aria-hidden="true" />{item.hint.label}</span>;
+}
+
 function StatusTag({ item }) {
   return <span className={`status-tag ${item.kind === 'draft' ? 'draft' : 'done'}`}>{item.kind === 'draft' ? 'Chưa nộp' : 'Đã nộp'}</span>;
 }
 
 /** Nút thao tác dùng chung cho thẻ và bảng. */
+/** Nút thao tác dùng chung cho thẻ và bảng; `compact` (bảng) chỉ hiện icon, nhãn nằm ở aria-label + tooltip. */
 function ItemActions({ item, busy, compact, onOpen, onResume, onDeleteDraft }) {
-  if (item.kind === 'result') return <Button variant="secondary" size="sm" full={!compact} icon={<ChevronRight className="icon" />} onClick={() => onOpen(item.id)}>{compact ? 'Xem lại' : 'Xem lại kết quả'}</Button>;
+  const where = [item.subjectName, item.section].filter(Boolean).join(' · ');
+  const iconOnly = label => compact ? { className: 'icon-btn', 'aria-label': `${label}: ${where}`, title: label } : { 'aria-label': `${label}: ${where}` };
+  if (item.kind === 'result') return <Button variant="secondary" size="sm" full={!compact} {...iconOnly('Xem lại kết quả')} onClick={() => onOpen(item.id)}>{!compact && <span>Xem lại kết quả</span>}<ChevronRight className="icon" aria-hidden="true" /></Button>;
   return <div className="draft-actions">
-    <Button size="sm" full={!compact} disabled={!!busy} loading={busy === `resume:${item.id}`} loadingText="Đang mở…" icon={<Play className="icon" />} onClick={() => onResume(item.draft)}>Làm tiếp</Button>
-    <Button variant="text" disabled={!!busy} loading={busy === `delete:${item.id}`} icon={<Trash2 className="icon" />} aria-label={`Xoá bài chưa nộp ${item.subjectName} · ${item.section}`} onClick={() => onDeleteDraft(item.draft)}>{compact ? '' : 'Xoá'}</Button>
+    <Button size="sm" full={!compact} disabled={!!busy} loading={busy === `resume:${item.id}`} loadingText={compact ? undefined : 'Đang mở…'} icon={<Play className="icon" />} {...iconOnly('Làm tiếp')} onClick={() => onResume(item.draft)}>{compact ? null : 'Làm tiếp'}</Button>
+    <Button variant="danger" size="sm" disabled={!!busy} loading={busy === `delete:${item.id}`} loadingText={compact ? undefined : 'Đang xoá…'} icon={<Trash2 className="icon" />} {...iconOnly('Xoá bài chưa nộp')} onClick={() => onDeleteDraft(item.draft)}>{compact ? null : 'Xoá'}</Button>
   </div>;
 }
 
 function HistoryCard({ item, ...actions }) {
-  return <article className={`panel result-card ${item.kind}`}>
-    <div className="result-card-top">
-      <div className="result-card-meta">
-        <StatusTag item={item} />
-        <h3 className="result-subject">{item.subjectName}</h3>
-        <span className="badge" title={item.section}><BookOpen className="icon" /> {item.section}</span>
-      </div>
-      {item.kind === 'result' && <ScoreRing percent={item.summary.percent} />}
+  const result = item.kind === 'result';
+  return <article className={`panel result-card ${item.kind} ${result ? `tone-${scoreTone(item.summary.percent)}` : ''}`}>
+    <div className="tag-row"><StatusTag item={item} /><HintTag item={item} /></div>
+    <div className="result-card-title">
+      <h3 className="result-subject" title={item.subjectName}>{item.subjectName}</h3>
     </div>
-    {item.kind === 'result' ? <>
-      <div className="result-card-score"><strong>{item.summary.correct}<small> / {item.summary.total}</small></strong><span className="muted">câu đúng</span></div>
-      <div className="result-card-foot muted small"><span><CalendarClock className="icon" /> {formatDateTime(item.date) || 'Không rõ thời gian'}</span>{item.summary.duration !== null && <span><Timer className="icon" /> {formatDuration(item.summary.duration)}</span>}</div>
-    </> : <>
-      <div className="draft-progress"><div className="result-card-score"><strong>{item.answered}<small> / {item.total}</small></strong><span className="muted">câu đã làm</span></div><progress value={item.answered} max={item.total || 1} aria-label="Tiến độ bài chưa nộp" /></div>
-      <div className="result-card-foot muted small"><span><CalendarClock className="icon" /> Lưu lúc {formatDateTime(item.date) || '—'}</span></div>
-    </>}
-    <ItemActions item={item} {...actions} />
+    {result && <div className="result-score-feature">
+      <ScoreRing percent={item.summary.percent} />
+      <span className="result-correct-count"><strong>{item.summary.correct}<small>/{item.summary.total}</small></strong><span>câu đúng</span></span>
+    </div>}
+    <dl className="result-card-details">
+      <div className="result-detail-row"><dt><BookOpen className="icon" aria-hidden="true" />Nội dung</dt><dd>{item.section || 'Không xác định'}</dd></div>
+      {!result && <div className="result-detail-row"><dt><Target className="icon" aria-hidden="true" />Tiến độ</dt><dd><span><strong>{item.answered}/{item.total}</strong> câu đã làm</span></dd></div>}
+      {!result && <progress value={item.answered} max={item.total || 1} aria-label="Tiến độ bài chưa nộp" />}
+      {result && item.summary.duration !== null && <div className="result-detail-row"><dt><Timer className="icon" aria-hidden="true" />Thời lượng</dt><dd>{formatDuration(item.summary.duration)}</dd></div>}
+      <div className="result-detail-row"><dt><CalendarClock className="icon" aria-hidden="true" />{result ? 'Nộp lúc' : 'Lưu lúc'}</dt><dd>{formatDateTime(item.date) || 'Không rõ thời gian'}</dd></div>
+    </dl>
+    <div className="result-card-footer">
+      <ItemActions item={item} {...actions} />
+    </div>
   </article>;
 }
 
@@ -139,16 +161,17 @@ function HistoryTable({ items, ...actions }) {
   return <div className="panel history-table-wrap">
     <table className="history-table">
       <caption className="sr-only">Lịch sử làm bài</caption>
-      <thead><tr><th scope="col">Trạng thái</th><th scope="col">Môn học</th><th scope="col">Chương / Nội dung</th><th scope="col">Kết quả</th><th scope="col">Thời gian</th><th scope="col">Thời lượng</th><th scope="col"><span className="sr-only">Thao tác</span></th></tr></thead>
+      <thead><tr><th scope="col">Trạng thái</th><th scope="col">Môn học</th><th scope="col">Chương / Nội dung</th><th scope="col">Kết quả</th><th scope="col">Thời gian</th><th scope="col">Thời lượng</th><th scope="col">Gợi ý AI</th><th scope="col" className="cell-actions-head">Thao tác</th></tr></thead>
       <tbody>{items.map(item => <tr key={`${item.kind}-${item.id}`} className={item.kind}>
         <td data-label="Trạng thái"><StatusTag item={item} /></td>
         <th scope="row" data-label="Môn học" className="cell-subject">{item.subjectName}</th>
-        <td data-label="Chương / Nội dung" className="cell-section" title={item.section}>{item.section}</td>
+        <td data-label="Chương / Nội dung" className="cell-section" title={item.section}><span className="clamp-2">{item.section || <span className="muted">Không xác định</span>}</span></td>
         <td data-label="Kết quả">{item.kind === 'result'
           ? <span className="cell-score"><strong className={`tone-${scoreTone(item.summary.percent)}`}>{item.summary.percent}%</strong> <span className="muted">{item.summary.correct}/{item.summary.total} câu đúng</span></span>
           : <span className="cell-score"><span className="muted">{item.answered}/{item.total} câu đã làm</span><progress value={item.answered} max={item.total || 1} aria-label="Tiến độ" /></span>}</td>
         <td data-label="Thời gian" className="cell-date">{item.kind === 'draft' && <span className="muted">Lưu lúc </span>}{formatDateTime(item.date) || '—'}</td>
         <td data-label="Thời lượng" className="muted">{item.kind === 'result' && item.summary.duration !== null ? formatDuration(item.summary.duration) : '—'}</td>
+        <td data-label="Gợi ý AI">{item.hint ? <HintTag item={item} /> : <span className="muted">—</span>}</td>
         <td className="cell-actions"><ItemActions item={item} compact {...actions} /></td>
       </tr>)}</tbody>
     </table>
@@ -189,12 +212,12 @@ export function HistoryList({ session, subjects, loadingSubjects, drafts, busy, 
       ...results.map(result => {
         const summary = resultSummary(result);
         const subject = byCertificate.get(result.certificateId);
-        return { kind: 'result', id: result._id, subjectId: subject?._id || '', subjectName: subject?.subject_name || 'Môn học không xác định', section: summary.section, date: summary.date, summary };
+        return { kind: 'result', id: result._id, subjectId: subject?._id || '', subjectName: subject?.subject_name || 'Môn học không xác định', section: summary.section, date: summary.date, summary, hint: hintStatus(summary.hintsEnabled, summary.hintsUsed) };
       }),
       ...drafts.map(draft => ({
         kind: 'draft', id: draft.id, subjectId: draft.subjectId,
         subjectName: subjects.find(s => s._id === draft.subjectId)?.subject_name || draft.subjectName || 'Môn học không xác định',
-        section: sectionOf(draft), date: draft.updatedAt, answered: draft.answered, total: draft.total, draft,
+        section: sectionOf(draft), date: draft.updatedAt, answered: draft.answered, total: draft.total, draft, hint: hintStatus(draft.hintsEnabled, draft.hintsUsed),
       })),
     ].sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0));
   }, [results, drafts, subjects]);
@@ -225,13 +248,15 @@ export function HistoryList({ session, subjects, loadingSubjects, drafts, busy, 
 
   return <section className="history-section" aria-labelledby="history-title" ref={top}>
     <div className="history-heading">
-      <div><h2 id="history-title"><HistoryIcon className="icon" /> Lịch sử làm bài</h2><p className="muted">Bài đã nộp và bài đang làm dở được lưu trong tài khoản ScoreUp của bạn.</p></div>
+      <div className="history-heading-intro">
+        <span className="history-heading-icon" aria-hidden="true"><HistoryIcon className="icon" /></span>
+        <div><h2 id="history-title">Lịch sử làm bài</h2><p className="muted">Bài đã nộp và bài đang làm dở được lưu trong tài khoản ScoreUp của bạn.</p></div>
+      </div>
       <div className="history-heading-actions">
         <div className="view-switch" role="group" aria-label="Kiểu hiển thị">
           <button type="button" className={view === 'grid' ? 'active' : ''} aria-pressed={view === 'grid'} onClick={() => changeView('grid')}><LayoutGrid className="icon" /> Thẻ</button>
           <button type="button" className={view === 'table' ? 'active' : ''} aria-pressed={view === 'table'} onClick={() => changeView('table')}><Rows3 className="icon" /> Bảng</button>
         </div>
-        <Button variant="text" disabled={!session} loading={loading} loadingText="Đang tải…" icon={<RefreshCw className="icon" />} onClick={() => setReload(v => v + 1)}>Làm mới</Button>
       </div>
     </div>
 
@@ -288,7 +313,7 @@ export function ResultReview({ session, resultId, subjects, onBack, onRetry, onU
       <ScoreRing percent={summary.percent} size="lg" />
       <div className="review-summary-copy">
         <span className="muted">{subject?.subject_name || 'Kết quả luyện tập'}</span>
-        <h2 id="review-title">{summary.section}</h2>
+        <h2 id="review-title">{summary.section || 'Kết quả luyện tập'}</h2>
         <div className="review-meta muted small">{formatDateTime(summary.date) && <span><CalendarClock className="icon" /> {formatDateTime(summary.date)}</span>}{summary.duration !== null && <span><Timer className="icon" /> {formatDuration(summary.duration)}</span>}</div>
         <div className="review-counts">
           <span className="count correct"><CircleCheck className="icon" /> {counts.correct} đúng</span>

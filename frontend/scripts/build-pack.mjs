@@ -11,6 +11,8 @@ const env = {
   ...(target === 'neu' ? {
     NEXT_PUBLIC_SCOREUP_API_URL: 'https://fit.neu.edu.vn/scoreup/v1/api',
     NEXT_PUBLIC_SCOREUP_MEDIA_URL: 'https://fit.neu.edu.vn/scoreup/media/',
+    // URL HTTPS của ai-service production; để trống = dùng Central LLM của Portal (không nhúng localhost từ .env.local).
+    NEXT_PUBLIC_SCOREPLUS_AI_URL: process.env.SCOREPLUS_NEU_AI_URL || '',
   } : {}),
 };
 

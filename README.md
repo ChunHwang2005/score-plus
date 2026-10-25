@@ -20,4 +20,4 @@ npm run dev
 
 ## AI service
 
-Khung thư mục AI service hiện được tạo để triển khai gia sư theo từng bước. Xem [ai-service/README.md](ai-service/README.md) để biết phạm vi và cấu trúc dự kiến.
+API gia sư gợi ý từng bước (vLLM `qwen3.5-35b-a3b-int4`): `cd ScorePlus/ai-service && npm start`. Xem [ai-service/README.md](ai-service/README.md).

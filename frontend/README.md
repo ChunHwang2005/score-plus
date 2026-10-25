@@ -51,7 +51,7 @@ Frontend gọi `GET` endpoint với `credentials: same-origin`, `cache: no-store
 
 Khi mở ScorePlus ngoài đường dẫn `/embed/scoreplus` của Portal và không nằm trong iframe (vd. `npm run dev` tại http://localhost:3000/), app hiện nút **Đăng nhập với Microsoft (NEU)** và đăng nhập giống ScoreUp: chuyển sang Microsoft (Web code flow, cùng app Azure), nhận `code` tại redirect URI rồi gửi ScoreUp `POST /auth/microsoft/code` để BE ScoreUp đổi lấy token (BE dùng `APP_SECRET`, frontend không giữ secret). Token giữ trong `sessionStorage` của tab để reload không phải đăng nhập lại; nút “Đăng xuất” xoá token.
 
-Cấu hình trong `.env.local`: `NEXT_PUBLIC_MICROSOFT_CLIENT_ID`, `NEXT_PUBLIC_MICROSOFT_TENANT_ID`, `NEXT_PUBLIC_MICROSOFT_REDIRECT_URI` (trống = `<origin>/`). Redirect URI phải được đăng ký trong Azure → Authentication → Web, khớp từng ký tự, nếu không Microsoft báo `AADSTS50011`. Local dùng URI đã đăng ký sẵn `http://localhost:3000/api/auth/callback/azure-ad` (dev server tự chuyển path này về `/` kèm `?code&state`). Cổng 3000 trùng AI-Portal và ScoreUp frontend khi dev: chỉ chạy một trong ba cùng lúc. Gợi ý AI dùng Central LLM của Portal nên không hoạt động khi chạy riêng.
+Cấu hình trong `.env.local`: `NEXT_PUBLIC_MICROSOFT_CLIENT_ID`, `NEXT_PUBLIC_MICROSOFT_TENANT_ID`, `NEXT_PUBLIC_MICROSOFT_REDIRECT_URI` (trống = `<origin>/`). Redirect URI phải được đăng ký trong Azure → Authentication → Web, khớp từng ký tự, nếu không Microsoft báo `AADSTS50011`. Local dùng URI đã đăng ký sẵn `http://localhost:3000/api/auth/callback/azure-ad` (dev server tự chuyển path này về `/` kèm `?code&state`). Cổng 3000 trùng AI-Portal và ScoreUp frontend khi dev: chỉ chạy một trong ba cùng lúc. Khi chạy riêng, gợi ý AI cần ai-service (`NEXT_PUBLIC_SCOREPLUS_AI_URL`); Central LLM của Portal không dùng được ngoài Portal.
 
 ## Đóng gói cho AI Portal
 
@@ -82,9 +82,10 @@ Tool có một route tĩnh; chọn môn/chương và làm bài bằng client sta
 ## Phạm vi
 
 - Chọn môn, luyện ngẫu nhiên hoặc một chương, 5–50 câu mỗi lượt.
-- Có thể yêu cầu gia sư AI đưa gợi ý cho từng câu qua endpoint Central LLM của AI Portal. AI chỉ nhận nội dung câu hỏi, lựa chọn và lựa chọn hiện tại (nếu có); không gửi thông tin tài khoản. Cần cấu hình Central LLM trong AI Portal. Gợi ý không thay thế đáp án/chấm điểm ScoreUp và có thể sai.
+- Có thể yêu cầu gia sư AI đưa gợi ý cho từng câu. Khi đặt `NEXT_PUBLIC_SCOREPLUS_AI_URL`, app gọi `POST /v1/hint` của [ScorePlus AI service](../ai-service/README.md) (gợi ý 3 cấp theo trạng thái làm bài, model vLLM `qwen3.5-35b-a3b-int4`); để trống thì dùng endpoint Central LLM của AI Portal. AI chỉ nhận nội dung câu hỏi, đoạn mã, lựa chọn, giải thích tham khảo và lựa chọn hiện tại (nếu có); không gửi thông tin tài khoản. Gợi ý không thay thế đáp án/chấm điểm ScoreUp và có thể sai.
+- Thực nghiệm với sinh viên: khi lớp học phần thuộc một đợt đang mở trên ScoreUp (`GET /tutor-experiments/me`), app hỏi đồng ý tham gia, bật cố định chế độ phản hồi ngay, ẩn gia sư với nhóm đối chứng, hiện thang đánh giá gợi ý 1–5 và gửi sự kiện luyện tập theo lô (chỉ khi đã đồng ý). ScoreUp chưa có API này thì app hoạt động như bình thường. Xem `ScoreUP/ScoreUp/backend-api/docs/tutor-experiment.md`.
 - Câu hỏi dạng unified/legacy, Markdown, bảng, code, ảnh và audio; không thực thi HTML từ nội dung câu hỏi.
-- Đáp án hiện sau từng câu hoặc khi nộp; bảng tiến độ, thêm câu mới, loại câu trùng.
+- Đáp án hiện khi nộp, hoặc ở chế độ "Phản hồi ngay": chọn sai được thử lại tối đa 3 lần (đáp án hiện khi đúng hoặc hết lượt), điểm lưu ScoreUp tính theo lần chọn đầu. Bảng tiến độ, thêm câu mới, loại câu trùng.
 - Nộp bài lưu đúng schema result ScoreUp; khóa nút khi request chạy và sau khi lưu thành công.
 - Responsive, hỗ trợ sáng/tối; thông báo lỗi mạng, phiên hết hạn, dữ liệu rỗng.
 

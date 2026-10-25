@@ -4,12 +4,13 @@ import { forwardRef } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { trackPointer } from '../lib/liquid.mjs';
 
-const VARIANT_CLASS = { primary: 'primary', secondary: 'secondary', text: 'text-button' };
+// danger dùng lại toàn bộ hiệu ứng của primary, chỉ đổi tông đỏ (globals.css .primary.danger).
+const VARIANT_CLASS = { primary: 'primary', danger: 'primary danger', secondary: 'secondary', text: 'text-button' };
 
 /**
- * Nút Liquid Glass (viên thuốc, nảy khi hover/bấm, vệt sáng theo con trỏ).
+ * Nút Liquid Glass (viên thuốc, nảy khi hover/bấm, dải sáng chéo chạy liên tục).
  *
- * @param {'primary'|'secondary'|'text'} [variant='primary']
+ * @param {'primary'|'danger'|'secondary'|'text'} [variant='primary']  danger: hành động xoá/không hoàn tác
  * @param {'md'|'sm'} [size='md']
  * @param {boolean} [full]      chiếm hết chiều ngang
  * @param {boolean} [loading]   hiện spinner + khoá nút; `loadingText` thay nội dung khi đang chạy

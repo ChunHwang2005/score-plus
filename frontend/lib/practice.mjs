@@ -19,6 +19,16 @@ export function parseQuestion(raw) {
     audio: modern ? raw.content.audio : text('audio'),
   };
 }
+// Chế độ phản hồi ngay (đề cương mục 5): chọn sai được thử lại; câu kết thúc khi đúng hoặc hết lượt (khớp HINT_LEVEL3_ATTEMPTS của ai-service).
+export const MAX_TRIES = 3;
+export function questionDone(question, answer, tries = [], max = MAX_TRIES) {
+  return !!answer && (answer === question.correct || tries.length >= max);
+}
+// Điểm lưu ScoreUp tính theo lần chọn đầu khi được thử lại, để gợi ý không làm tăng điểm luyện tập.
+export function scoredAnswers(questions, answers, tries, instant) {
+  if (!instant) return answers;
+  return Object.fromEntries(questions.filter(q => answers[q.id]).map(q => [q.id, tries[q.id]?.[0] || answers[q.id]]));
+}
 export function resultPayload({ questions, answers, subject, section, start, end }) {
   const items = questions.map((q, index) => ({ question: q.id, user_ans: answers[q.id] ? [answers[q.id]] : [], correct_ans: q.correct ? [q.correct] : [], score: answers[q.id] && answers[q.id] === q.correct ? 1 : 0, index }));
   return { certificateId: certificateIdOf(subject), questions: [{ section, multi: false, questions: items }], total: items.length, correct: items.reduce((n, q) => n + q.score, 0), start, end };
@@ -65,7 +75,10 @@ export function resultSummary(result) {
     correct,
     percent: total ? Math.round(correct / total * 100) : 0,
     duration: Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null,
-    section: result?.questions?.[0]?.section || 'Luyện tập',
+    // /questions/result/mine trả `section` gọn; bản đầy đủ (/questions/result, /result/:id) để trong questions[0].
+    section: result?.section || result?.questions?.[0]?.section || '', // rỗng = kết quả cũ không lưu tên chương
+    hintsEnabled: result?.hints_enabled ?? null,
+    hintsUsed: result?.hints_used ?? null,
     date: result?.end || result?.createdAt || result?.start || null,
   };
 }
@@ -107,4 +120,11 @@ export function pageWindow(page, pages, around = 1) {
   for (let p = page - around; p <= page + around; p++) if (p >= 1 && p <= pages) keep.add(p);
   const sorted = [...keep].sort((a, b) => a - b);
   return sorted.flatMap((p, i) => i && p - sorted[i - 1] > 2 ? ['…', p] : i && p - sorted[i - 1] === 2 ? [p - 1, p] : [p]);
+}
+
+/** Trạng thái dùng gợi ý AI của một lượt; null khi không có dữ liệu (bản ghi cũ / làm trên ScoreUp). */
+export function hintStatus(enabled, used) {
+  if (enabled === false) return { kind: 'off', label: 'Tắt gợi ý' };
+  if (enabled !== true) return null;
+  return Number(used) > 0 ? { kind: 'used', label: `Đã dùng gợi ý (${used})` } : { kind: 'unused', label: 'Không dùng gợi ý' };
 }

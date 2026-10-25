@@ -48,13 +48,15 @@ export function draftSummary(draft) {
     instant: !!draft.instant,
     start: draft.start || null,
     updatedAt: draft.updatedAt || null,
+    hintsEnabled: draft.hints_enabled ?? null,
+    hintsUsed: draft.hints_used ?? null,
     answered: local ? draft.questions.filter(q => draft.answers?.[q.id]).length : Number(draft.answered_count) || 0,
     total: local ? draft.questions.length : Number(draft.total_questions) || 0,
   };
 }
 
 /** Body cho PUT /practice-drafts/:id — chỉ gửi id câu hỏi. */
-export function draftBody({ subject, chapter, label, instant, start, questions, answers }) {
+export function draftBody({ subject, chapter, label, instant, start, hints_enabled, hints_used, questions, answers }) {
   const ids = questions.map(q => q.id);
   const known = new Set(ids);
   return {
@@ -64,6 +66,8 @@ export function draftBody({ subject, chapter, label, instant, start, questions, 
     label: label || '',
     instant: !!instant,
     start: start || null,
+    ...(typeof hints_enabled === 'boolean' ? { hints_enabled } : {}),
+    ...(Number.isInteger(hints_used) ? { hints_used } : {}),
     questions: ids,
     answers: Object.fromEntries(Object.entries(answers || {}).filter(([id, value]) => known.has(id) && value)),
   };
@@ -99,7 +103,7 @@ export function createDraftStore({ token, userId, request, storage = browserStor
       const data = unwrap(await request(path(id), { token }));
       const summary = draftSummary(data);
       return {
-        id: summary.id, chapter: summary.chapter, label: summary.label, instant: summary.instant, start: summary.start,
+        id: summary.id, chapter: summary.chapter, label: summary.label, instant: summary.instant, start: summary.start, hints_used: summary.hintsUsed || 0,
         subject: { _id: summary.subjectId, subject_name: summary.subjectName },
         questions: (data.questions || []).map(parseQuestion).filter(q => q.id && q.question && q.options.length),
         answers: data.answers || {},

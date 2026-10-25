@@ -26,6 +26,9 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "adm-zip": "^0.5.16"
+    "@tailwindcss/postcss": "^4.3.3",
+    "adm-zip": "^0.5.16",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^4.3.3"
   }
 }

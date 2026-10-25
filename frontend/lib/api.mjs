@@ -7,7 +7,7 @@ export function mediaUrl(value) {
     return ['https:', 'http:'].includes(url.protocol) ? url.href : '';
   } catch { return ''; }
 }
-export async function request(path, { token, body, method, signal } = {}) {
+export async function request(path, { token, body, method, signal, keepalive } = {}) {
   let response;
   try {
     response = await fetch(`${API_URL}${path}`, {
@@ -16,6 +16,7 @@ export async function request(path, { token, body, method, signal } = {}) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: signal || AbortSignal.timeout(30000),
       credentials: 'omit',
+      ...(keepalive ? { keepalive: true } : {}), // gửi được khi trang đang đóng
     });
   } catch (error) {
     if (error.name === 'AbortError') throw error;
