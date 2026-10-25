@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadPortalScoreupSession, loadPortalUser, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
+import { API_URL } from '../lib/api.mjs';
+import { loadPortalScoreupSession, loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
 
 function fakeWindow() {
   const listeners = new Set();
@@ -117,5 +118,45 @@ test('SSO refuses missing/foreign paths, missing token and invalid ScoreUp sessi
       ? new Response(JSON.stringify({ token: 'invalid' }))
       : new Response('{}', { status: 401 });
     await assert.rejects(loadPortalScoreupSession({ path: '/api/session', win: fakeWindow() }), error => error.status === 401);
+  } finally { global.fetch = original; }
+});
+
+test('falls back to the Portal Microsoft token when the Portal SSO endpoint is missing', async () => {
+  const original = global.fetch;
+  const calls = [];
+  global.fetch = async (url, init = {}) => {
+    calls.push(url);
+    if (url === 'https://portal.example/apps/api/scoreplus/session') return new Response('<html>404</html>', { status: 404 });
+    if (url === 'https://portal.example/apps/api/auth/session') return new Response(JSON.stringify({ user: { id: 'p1' }, accessToken: 'ms-token' }));
+    if (url === `${API_URL}/auth/microsoft/token`) {
+      assert.deepEqual(JSON.parse(init.body), { accessToken: 'ms-token' });
+      return new Response(JSON.stringify({ metadata: { token: 'scoreup-token' } }));
+    }
+    if (url === `${API_URL}/user/info`) {
+      assert.equal(init.headers.Authorization, 'Bearer scoreup-token');
+      return new Response(JSON.stringify({ metadata: { _id: 'u1' } }));
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const session = await loadScoreupSessionFromPortal({ path: '/api/scoreplus/session', win: fakeWindow() });
+    assert.deepEqual(session, { token: 'scoreup-token', user: { _id: 'u1' } });
+    assert.equal(calls[0], 'https://portal.example/apps/api/scoreplus/session');
+  } finally { global.fetch = original; }
+});
+
+test('Microsoft fallback: expired Portal session does not fall back; missing or expired Microsoft token explains next step', async () => {
+  const original = global.fetch;
+  try {
+    global.fetch = async () => new Response(JSON.stringify({ status: 'ERROR' }), { status: 401 });
+    await assert.rejects(loadScoreupSessionFromPortal({ path: '/api/scoreplus/session', win: fakeWindow() }), e => e.status === 401 && /AI-Portal/.test(e.message));
+
+    global.fetch = async url => url.endsWith('/api/scoreplus/session') ? new Response('', { status: 404 }) : new Response(JSON.stringify({ user: { id: 'p1' } }));
+    await assert.rejects(loadScoreupSessionFromPortal({ path: '/api/scoreplus/session', win: fakeWindow() }), /đăng nhập AI-Portal bằng tài khoản Microsoft/);
+
+    global.fetch = async url => url.endsWith('/api/scoreplus/session') ? new Response('', { status: 404 })
+      : url.endsWith('/api/auth/session') ? new Response(JSON.stringify({ user: { id: 'p1' }, accessToken: 'old' }))
+      : new Response(JSON.stringify({ status: 'ERROR' }), { status: 401 });
+    await assert.rejects(loadScoreupSessionFromPortal({ path: '/api/scoreplus/session', win: fakeWindow() }), /đăng xuất và đăng nhập lại AI-Portal/);
   } finally { global.fetch = original; }
 });
