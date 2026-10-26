@@ -73,8 +73,8 @@ test('pageWindow keeps first/last pages and collapses gaps', () => {
   assert.deepEqual(pageWindow(3, 10), [1, 2, 3, 4, '…', 10]);
 });
 
-test('instant mode allows retries and scores the first attempt', async () => {
-  const { MAX_TRIES, questionDone, scoredAnswers } = await import('../lib/practice.mjs');
+test('instant mode allows retries; correct within MAX_TRIES counts, all tries wrong does not', async () => {
+  const { MAX_TRIES, questionDone, resultPayload, reviewItems, triesNote } = await import('../lib/practice.mjs');
   const q = { id: 'q1', correct: 'B' };
   assert.equal(questionDone(q, 'A', ['A']), false); // sai lần đầu, còn lượt
   assert.equal(questionDone(q, 'B', ['A', 'B']), true); // đúng ở lần 2
@@ -83,14 +83,23 @@ test('instant mode allows retries and scores the first attempt', async () => {
   const questions = [q, { id: 'q2', correct: 'A' }, { id: 'q3', correct: 'A' }];
   const answers = { q1: 'B', q2: 'A' };
   const tries = { q1: ['A', 'B'], q2: ['A'] };
-  assert.deepEqual(scoredAnswers(questions, answers, tries, true), { q1: 'A', q2: 'A' });
-  assert.equal(scoredAnswers(questions, answers, tries, false), answers); // chế độ thường: lựa chọn cuối
+  const triesAll = { ...tries, q3: ['B', 'C', 'D'] };
+  const payload = resultPayload({ questions, answers: { ...answers, q3: 'D' }, tries: triesAll, subject: { _id: 's' }, section: 'Chương 1' });
+  const items = payload.questions[0].questions;
+  assert.equal(payload.correct, 2); // q1 đúng ở lần 2 vẫn tính đúng; q3 sai cả 3 lần tính sai
+  assert.deepEqual(items.map(i => i.score), [1, 1, 0]);
+  assert.deepEqual(items[0].tries, ['A', 'B']);
+  assert.equal('tries' in resultPayload({ questions, answers, subject: { _id: 's' }, section: 'x' }).questions[0].questions[0], false); // chế độ bài thi
+  const review = reviewItems(payload);
+  assert.equal(triesNote(review[0].status, review[0].tries), 'Đúng ở lần thử 2');
+  assert.equal(triesNote(review[1].status, review[1].tries), '');
+  assert.equal(triesNote(review[2].status, review[2].tries), `Sai cả ${MAX_TRIES} lần`);
 });
 
 test('hintStatus distinguishes used / unused / off / unknown', () => {
-  assert.deepEqual(hintStatus(true, 3), { kind: 'used', label: 'Đã dùng gợi ý (3)' });
-  assert.equal(hintStatus(true, 0).kind, 'unused');
-  assert.equal(hintStatus(false, 0).kind, 'off');
+  assert.deepEqual(hintStatus(true, 3), { kind: 'used', label: 'Bật gợi ý · dùng 3 lần' });
+  assert.deepEqual(hintStatus(true, 0), { kind: 'unused', label: 'Bật gợi ý · chưa dùng' });
+  assert.deepEqual(hintStatus(false, 0), { kind: 'off', label: 'Tắt gợi ý AI' });
   assert.equal(hintStatus(null, null), null);
   assert.deepEqual([resultSummary({ hints_enabled: true, hints_used: 2 }).hintsEnabled, resultSummary({}).hintsUsed], [true, null]);
 });
@@ -104,4 +113,23 @@ test('resultSummary reads the chapter from /questions/result/mine items (top-lev
   assert.equal(resultSummary({ _id: 'r1', section: 'Chương 4', total: 10, correct: 2 }).section, 'Chương 4');
   assert.equal(resultSummary({ _id: 'r2', section: 'Luyện ngẫu nhiên' }).section, 'Luyện ngẫu nhiên');
   assert.equal(resultSummary({ _id: 'r3', questions: [{ section: 'Chương 1' }] }).section, 'Chương 1'); // legacy / detail shape
+});
+
+test('shared answer display: status labels, option tags and attempt summary', async () => {
+  const { answerStatus, attemptSummary, optionTag, optionWrong, statusLabel } = await import('../lib/practice.mjs');
+  assert.equal(answerStatus('', 'B'), 'skipped');
+  assert.equal(statusLabel('correct', ['A', 'B']), '✓ Đúng ở lần thử 2');
+  assert.equal(statusLabel('correct', []), '✓ Chính xác');
+  assert.equal(statusLabel('wrong', ['A', 'C', 'D']), '✗ Sai cả 3 lần');
+  assert.equal(statusLabel('wrong', []), '✗ Sai');
+  const retried = { selected: 'B', correct: 'B', tries: ['A', 'B'] };
+  assert.equal(optionTag('A', retried), 'Lần 1 · Sai');
+  assert.equal(optionTag('B', retried), 'Lần 2 · Đúng');
+  assert.equal(optionTag('C', retried), '');
+  assert.equal(optionWrong('A', retried), true);
+  const exam = { selected: 'A', correct: 'B', tries: [] };
+  assert.equal(optionTag('A', exam), 'Bạn chọn');
+  assert.equal(optionTag('B', exam), 'Đáp án đúng');
+  const questions = ['q1', 'q2', 'q3', 'q4'].map(id => ({ id, correct: 'B' }));
+  assert.deepEqual(attemptSummary(questions, { q1: 'B', q2: 'B', q3: 'D' }, { q1: ['B'], q2: ['A', 'B'], q3: ['A', 'C', 'D'] }), { first: 1, retried: 1, wrong: 1, skipped: 1 });
 });
