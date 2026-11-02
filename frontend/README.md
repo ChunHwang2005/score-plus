@@ -1,6 +1,6 @@
 # ScorePlus
 
-Ứng dụng Next.js frontend-only cho AI Portal, dựa trên luồng **Luyện tập sinh viên** của ScoreUp. Không có navbar; không cần backend hoặc database riêng.
+Ứng dụng Next.js (export tĩnh) cho AI Portal, dựa trên luồng **Luyện tập sinh viên** của ScoreUp. Không có navbar, không cần database riêng; gói Portal gộp kèm [ai-service](../ai-service/README.md) làm backend gia sư AI.
 
 ## Chạy local
 
@@ -61,15 +61,27 @@ npm test
 npm run pack
 ```
 
-Upload `dist/scoreplus.zip` (từ thư mục `ScorePlus/frontend`) vào phần quản trị công cụ AI Portal. Cấu trúc ZIP:
+Upload `dist/scoreplus.zip` (từ thư mục `ScorePlus/frontend`) ở **Admin → Công cụ → Cài từ gói** của AI Portal. Gói có backend nên chỉ quản trị cài được; "Cài từ file (chỉ mình tôi)" không nhận gói này. Cấu trúc ZIP:
 
 ```text
-manifest.json
-public/index.html
+manifest.json          // alias scoreplus, hasBackend: true
+package.json           // sinh từ ai-service/package.json (không có dependency)
+public/index.html      // output tĩnh của Next
 public/_next/...
+dist/embed.js          // ai-service/portal/embed.js — Portal mount tại /api/apps/scoreplus
+dist/server.js         // ai-service/portal/server.js — chạy standalone
+app/, models/          // mã ai-service
+.env                   // chỉ khi có ai-service/.env.portal
 ```
 
-Alias cố định là `scoreplus`, `hasFrontendOnly: true`, `hasBackend: false`. Gói chỉ chứa manifest và output tĩnh, không chứa source, `.env`, node_modules hay server. Script kiểm tra giới hạn 50 MB của Portal.
+Alias cố định là `scoreplus`. Frontend gọi `POST <base path Portal>/api/apps/scoreplus/v1/hint` (base path lấy như các API Portal khác qua `portalApiPath`, vd. `/apps/api/apps/scoreplus`; không dùng `window.__WRITE_API_BASE__` vì sau reverse proxy giá trị này thiếu `/apps`) nên cùng origin với Portal, không cần CORS hay HTTPS riêng cho ai-service. Script kiểm tra giới hạn 50 MB của Portal.
+
+Khóa LLM (chọn một):
+
+- Tạo `ai-service/.env.portal` (cùng định dạng `.env.example`, đã gitignore) trước khi `npm run pack`; script đưa vào gói thành `.env`. Gói khi đó chứa khóa, không chia sẻ công khai.
+- Hoặc đặt biến `SCOREPLUS_<TÊN>` trên server AI Portal, vd. `SCOREPLUS_LLM_API_KEY`, `SCOREPLUS_LLM_MODEL`; giá trị này ghi đè `.env` trong gói. App nhúng không đọc biến không có tiền tố của Portal.
+
+Log gợi ý nằm ở `backend/data/app-logs/scoreplus` của Portal (không bị xoá khi cài lại gói).
 
 Portal local ở domain root: dùng `npm run pack:local`, output `dist/scoreplus-local.zip`. Portal khác dưới `/tuyen-sinh`: đặt `PORTAL_BASE_PATH=/tuyen-sinh` và dùng `npm run pack:custom`; URL sẽ là `/tuyen-sinh/embed/scoreplus/`. Cấu hình được đặt trong **ScorePlus/frontend**, không cần đổi Next config của AI Portal. Không cần sửa Docker Compose hoặc chạy `next start` cho gói tĩnh.
 
@@ -82,7 +94,7 @@ Tool có một route tĩnh; chọn môn/chương và làm bài bằng client sta
 ## Phạm vi
 
 - Chọn môn, luyện ngẫu nhiên hoặc một chương, 5–50 câu mỗi lượt.
-- Có thể yêu cầu gia sư AI đưa gợi ý cho từng câu. Khi đặt `NEXT_PUBLIC_SCOREPLUS_AI_URL`, app gọi `POST /v1/hint` của [ScorePlus AI service](../ai-service/README.md) (gợi ý 3 cấp theo trạng thái làm bài, model vLLM `qwen3.5-35b-a3b-int4`); để trống thì dùng endpoint Central LLM của AI Portal. AI chỉ nhận nội dung câu hỏi, đoạn mã, lựa chọn, giải thích tham khảo và lựa chọn hiện tại (nếu có); không gửi thông tin tài khoản. Gợi ý không thay thế đáp án/chấm điểm ScoreUp và có thể sai.
+- Có thể yêu cầu gia sư AI đưa gợi ý cho từng câu. App gọi `POST /v1/hint` của [ScorePlus AI service](../ai-service/README.md) (gợi ý 3 cấp theo trạng thái làm bài, model vLLM `qwen3.5-35b-a3b-int4`): khi dev qua `NEXT_PUBLIC_SCOREPLUS_AI_URL`, trong gói Portal qua ai-service nhúng; không có cả hai thì dùng endpoint Central LLM của AI Portal. AI chỉ nhận nội dung câu hỏi, đoạn mã, lựa chọn, giải thích tham khảo và lựa chọn hiện tại (nếu có); không gửi thông tin tài khoản. Gợi ý không thay thế đáp án/chấm điểm ScoreUp và có thể sai.
 - Thực nghiệm với sinh viên: khi lớp học phần thuộc một đợt đang mở trên ScoreUp (`GET /tutor-experiments/me`), app hỏi đồng ý tham gia; với sinh viên đã đồng ý, chế độ làm bài cố định theo nhóm: nhóm có gia sư dùng phản hồi ngay và gợi ý AI, nhóm đối chứng làm như bài thi (nộp mới biết kết quả). Sinh viên từ chối dùng ScorePlus như bình thường. App hiện thang đánh giá gợi ý 1–5 và gửi sự kiện luyện tập theo lô (chỉ khi đã đồng ý). ScoreUp chưa có API này thì app hoạt động như bình thường. Xem `ScoreUP/ScoreUp/backend-api/docs/tutor-experiment.md`.
 - Câu hỏi dạng unified/legacy, Markdown, bảng, code, ảnh và audio; không thực thi HTML từ nội dung câu hỏi.
 - Đáp án hiện khi nộp, hoặc ở chế độ "Phản hồi ngay": chọn sai được thử lại tối đa 3 lần (đáp án hiện khi đúng hoặc hết lượt), điểm lưu ScoreUp tính theo lựa chọn cuối: đúng trong tối đa 3 lần thử thì tính đúng, sai cả 3 lần thì tính sai. Các lần thử được lưu kèm (`tries`) để Lịch sử hiện "Đúng ở lần thử 2" / "Sai cả 3 lần" và đánh dấu phương án đã thử sai. Bảng tiến độ, thêm câu mới, loại câu trùng.

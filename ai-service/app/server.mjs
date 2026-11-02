@@ -37,6 +37,11 @@ function send(res, status, body) {
 }
 
 async function readJson(req) {
+  // Khi nhúng trong AI-Portal, body đã được express.json() của Portal đọc và parse sẵn.
+  if (req.body && typeof req.body === 'object') {
+    if (Buffer.byteLength(JSON.stringify(req.body)) > MAX_BODY) throw new ValidationError('Dữ liệu yêu cầu quá lớn.');
+    return req.body;
+  }
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
@@ -87,7 +92,8 @@ export function createApp(config = loadConfig(), { fetchImpl = fetch } = {}) {
   const allow = createRateLimiter(config.rateLimit);
   const log = createHintLogger(config.logDir);
   return async (req, res) => {
-    const origin = req.headers.origin;
+    // Nhúng trong AI-Portal: request đi qua /api/apps/scoreplus cùng origin với Portal nên không cần CORS.
+    const origin = config.embedded ? undefined : req.headers.origin;
     if (origin && config.allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
@@ -102,7 +108,10 @@ export function createApp(config = loadConfig(), { fetchImpl = fetch } = {}) {
     if (req.method !== 'POST') { send(res, 405, { message: 'Chỉ hỗ trợ POST.' }); return; }
     if (origin && !config.allowedOrigins.includes(origin)) { send(res, 403, { message: 'Origin không được phép.' }); return; }
     const clientIp = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
-    if (!allow(clientIp)) { send(res, 429, { message: 'Bạn yêu cầu gợi ý quá nhanh. Hãy thử lại sau ít phút.' }); return; }
+    // Portal gắn X-User-* đã xác thực: giới hạn theo tài khoản để cả lớp dùng chung một IP (NAT) không bị chặn lẫn nhau.
+    // Khách nhận id ngẫu nhiên mỗi request nên vẫn tính theo IP.
+    const userId = config.embedded && req.headers['x-user-email'] !== 'guest@local' ? String(req.headers['x-user-id'] || '') : '';
+    if (!allow(userId ? `user:${userId}` : clientIp)) { send(res, 429, { message: 'Bạn yêu cầu gợi ý quá nhanh. Hãy thử lại sau ít phút.' }); return; }
     try {
       const input = parseHintRequest(await readJson(req));
       const started = Date.now();
@@ -123,11 +132,13 @@ export function createApp(config = loadConfig(), { fetchImpl = fetch } = {}) {
   };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function startServer() {
   try { process.loadEnvFile(new URL('../.env', import.meta.url)); } catch { /* .env là tùy chọn */ }
   const config = loadConfig();
   if (!config.llmKey) console.warn('[ai-service] Chưa đặt LLM_API_KEY; Kong sẽ từ chối request.');
-  createServer(createApp(config)).listen(config.port, () => {
+  return createServer(createApp(config)).listen(config.port, () => {
     console.log(`[ai-service] http://localhost:${config.port} → ${config.llmUrl} (${config.provider}: ${config.model})`);
   });
 }
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) startServer();

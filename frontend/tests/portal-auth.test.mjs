@@ -160,3 +160,14 @@ test('Microsoft fallback: expired Portal session does not fall back; missing or 
     await assert.rejects(loadScoreupSessionFromPortal({ path: '/api/scoreplus/session', win: fakeWindow() }), /đăng xuất và đăng nhập lại AI-Portal/);
   } finally { global.fetch = original; }
 });
+
+test('tutor API base prefers explicit URL, then the bundled Portal app API, else Central LLM', async () => {
+  const { tutorApiBase } = await import('../lib/portal-auth.mjs');
+  // ai.neu.edu.vn: Portal inject __WRITE_API_BASE__ thiếu /apps; base path lấy từ URL iframe như các API Portal khác.
+  const win = { __WRITE_API_BASE__: '/api/apps/scoreplus', location: { pathname: '/apps/embed/scoreplus/' } };
+  assert.equal(tutorApiBase({ url: 'http://localhost:8090/', bundled: true }, win), 'http://localhost:8090');
+  assert.equal(tutorApiBase({ bundled: true }, win), '/apps/api/apps/scoreplus');
+  assert.equal(tutorApiBase({ bundled: true }, { ...win, __PORTAL_BASE_PATH__: '/tuyen-sinh' }), '/tuyen-sinh/api/apps/scoreplus');
+  assert.equal(tutorApiBase({ bundled: true }, { location: { pathname: '/embed/scoreplus/' } }), '/api/apps/scoreplus');
+  assert.equal(tutorApiBase({ bundled: false }, win), '');
+});

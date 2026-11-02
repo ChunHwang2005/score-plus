@@ -5,7 +5,7 @@ import { ArrowLeft, BookOpen, Check, CheckCircle2, ChevronRight, CircleHelp, Clo
 import { mediaUrl, request } from '../lib/api.mjs';
 import { MAX_TRIES, answerStatus, attemptSummary, certificateIdOf, chapterName, formatDateTime, optionTag, optionWrong, parseQuestion, questionDone, resultPayload, reviewItems, sectionOf, statusLabel, unwrap } from '../lib/practice.mjs';
 import { createDraftStore, newAttemptId } from '../lib/drafts.mjs';
-import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
+import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser, tutorApiBase } from '../lib/portal-auth.mjs';
 import { STAGE_LABELS, openStudyStage, saveStudyDraft, submitStudyStage, activeStudy, completeExperiment, createEventQueue, instantFor, loadExperiment, lockStudy, pendingPractice, practiceAttemptId, saveConsent, sendEvents } from '../lib/experiment.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
@@ -16,8 +16,10 @@ import { clearStandaloneSession, isStandalone, loadStandaloneSession, microsoftL
 
 // Endpoint SSO của AI-Portal (backend routes/scoreplus.ts); env chỉ dùng khi Portal đặt endpoint ở path khác.
 const SESSION_PATH = process.env.NEXT_PUBLIC_PORTAL_SCOREUP_SESSION_PATH || '/api/scoreplus/session';
-// ScorePlus AI service (ai-service/, gọi Ollama ở server). Để trống = dùng Central LLM của AI-Portal.
+// ScorePlus AI service (ai-service/, gọi LLM ở server): URL riêng khi dev; gói Portal nhúng sẵn ai-service (BUNDLED=1).
+// Không có cả hai = dùng Central LLM của AI-Portal.
 const AI_URL = (process.env.NEXT_PUBLIC_SCOREPLUS_AI_URL || '').replace(/\/+$/, '');
+const AI_BUNDLED = process.env.NEXT_PUBLIC_SCOREPLUS_AI_BUNDLED === '1';
 const AI_HINTS_KEY = 'scoreplus:ai-hints';
 const STUDY_LABEL = 'Bài luyện tập nghiên cứu';
 // Thang Likert đánh giá gợi ý: [trường, nhãn, nghĩa của 1, nghĩa của 5].
@@ -532,8 +534,9 @@ export default function Practice() {
       const previous = hints[question.id];
       const hintCount = previous && previous.attempt === attemptCount ? previous.count + 1 : 1;
       const started = performance.now();
-      const response = AI_URL
-        ? await fetch(`${AI_URL}/v1/hint`, {
+      const aiBase = tutorApiBase({ url: AI_URL, bundled: AI_BUNDLED });
+      const response = aiBase
+        ? await fetch(`${aiBase}/v1/hint`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // Chỉ gửi dữ liệu câu hỏi; ai-service tự dựng prompt và giữ khóa Ollama.
@@ -545,7 +548,8 @@ export default function Practice() {
             revealed: !!(batch?.instant && selected), answer_shown: done(question), attempts: attemptCount, prior_wrong: priorWrong[question.id] || 0, hint_count: hintCount,
           }),
           signal: AbortSignal.timeout(75000),
-          credentials: 'omit',
+          // Bản nhúng cùng origin: gửi cookie để Portal gắn X-User-* (giới hạn tần suất theo tài khoản).
+          credentials: AI_URL ? 'omit' : 'same-origin',
         })
         : await fetch(portalApiPath('/api/ai/complete'), {
           method: 'POST',
@@ -557,8 +561,8 @@ export default function Practice() {
       const data = await response.json().catch(() => null);
       if (generation !== authGeneration.current) return;
       if (!response.ok) {
-        if (response.status === 503 && !AI_URL) throw new Error(data?.message || 'AI-Portal chưa cấu hình Central LLM.');
-        throw new Error(data?.message || `${AI_URL ? 'AI service' : 'AI-Portal'} trả về lỗi (${response.status}).`);
+        if (response.status === 503 && !aiBase) throw new Error(data?.message || 'AI-Portal chưa cấu hình Central LLM.');
+        throw new Error(data?.message || `${aiBase ? 'AI service' : 'AI-Portal'} trả về lỗi (${response.status}).`);
       }
       if (!data?.content) throw new Error('AI chưa tạo được gợi ý. Hãy thử lại.');
       const label = data.status === 'insufficient' ? 'Chưa đủ căn cứ' : data.level ? `Gợi ý cấp ${data.level} · ${data.label}` : data.label || 'Gợi ý học tập';
