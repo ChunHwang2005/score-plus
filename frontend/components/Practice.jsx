@@ -675,7 +675,20 @@ export default function Practice() {
     {standalone && authState === 'signed-out' && <div className="notice" role="status"><span>Đăng nhập bằng tài khoản Microsoft NEU để làm bài và lưu kết quả.</span><Button onClick={signIn}>Đăng nhập với Microsoft (NEU)</Button></div>}
     {authError && <div className="notice error" role="alert"><span>{authError}</span>{!standalone && <Button variant="text" disabled={!!busy || authState === 'connecting'} onClick={() => { setAuthError(''); setAuthState('waiting'); setAuthReload(v => v + 1); }}>Kết nối lại</Button>}</div>}
     {error && <div className="notice error" role="alert"><span>{error}</span><Button variant="text" onClick={() => setError('')}>Đóng</Button></div>}
-    {study?.experiment?.flow && study.consent === true && !study.completed && <div className="notice" role="status"><div><strong>Tiến trình thực nghiệm</strong><ol className="mt-2 flex flex-wrap gap-x-6 gap-y-2">{study.experiment.stages.map((stage, index) => <li key={stage.key}><span>{study.stage_results?.[stage.key]?.completed_at ? '✓' : `${index + 1}.`} {STAGE_LABELS[stage.key]}{study.stage === stage.key ? ' · Đang chờ hoàn thành' : ''}</span></li>)}</ol></div></div>}
+    {study?.experiment?.flow && study.consent === true && !study.completed && (() => {
+      const stages = study.experiment.stages;
+      const doneCount = stages.filter(stage => study.stage_results?.[stage.key]?.completed_at).length;
+      return <section className="notice study-progress" aria-labelledby="study-progress-title">
+        <div className="study-progress-head"><strong id="study-progress-title">Tiến trình thực nghiệm</strong><span className="muted small">Hoàn thành {doneCount}/{stages.length} bước</span></div>
+        <ol className="study-steps">{stages.map((stage, index) => {
+          const state = study.stage_results?.[stage.key]?.completed_at ? 'done' : study.stage === stage.key ? 'current' : 'upcoming';
+          return <li key={stage.key} className={`study-step ${state}`} aria-current={state === 'current' ? 'step' : undefined}>
+            <span className="study-step-dot" aria-hidden="true">{state === 'done' ? <Check className="icon" /> : index + 1}</span>
+            <span className="study-step-text"><span>{STAGE_LABELS[stage.key]}</span><span className="small">{state === 'done' ? 'Đã hoàn thành' : state === 'current' ? 'Đang thực hiện' : 'Chưa bắt đầu'}</span></span>
+          </li>;
+        })}</ol>
+      </section>;
+    })()}
     {study && !study.completed && (view === 'home' || submitted) && <div className="notice" role="status"><span>Lớp của bạn tham gia nghiên cứu <strong>{study.experiment.name}</strong> · {study.consent ? (studyPractice ? (study.experiment.flow ? `tiếp theo: ${STAGE_LABELS[study.stage]}` : 'bạn chưa làm bài luyện tập của đợt') : 'bạn đã đồng ý ghi dữ liệu ẩn danh') : study.consent === false ? 'bạn không tham gia thu thập dữ liệu' : 'bạn chưa trả lời'}.</span>{studyPractice && <Button variant="text" disabled={!!busy} onClick={() => startStudyPractice()}>Làm bài nghiên cứu</Button>}<Button variant="text" onClick={() => setConsentOpen(true)}>{study.consent ? 'Rút lại đồng ý' : 'Thay đổi lựa chọn'}</Button></div>}
   </>;
   const percent = questions.length ? Math.round(correct / questions.length * 100) : 0;
