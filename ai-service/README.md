@@ -79,8 +79,8 @@ Trả về `{ "status": "ok" | "insufficient" | "blocked", "content": "<Markdown
 
 ## Triển khai
 
-- Trang Portal chạy HTTPS (`https://ai.neu.edu.vn`) nên service cũng phải có URL HTTPS (reverse proxy), nếu không trình duyệt chặn mixed content. Đóng gói frontend: `SCOREPLUS_NEU_AI_URL=https://<host>/scoreplus-ai npm run pack`.
-- Thêm origin Portal vào `CORS_ALLOWED_ORIGINS`. Khi chạy sau reverse proxy, rate limit dựa trên `X-Forwarded-For`.
+- **Trong AI-Portal (mặc định):** `npm run pack` ở `frontend/` gộp service này vào cùng gói ZIP ([portal/embed.js](portal/embed.js) → `dist/embed.js`). Portal chạy nó trong process backend tại `/api/apps/scoreplus`, cùng origin với trang nên không cần CORS hay URL HTTPS riêng; rate limit tính theo tài khoản Portal (khách: theo IP). Cấu hình đọc từ `.env` trong gói (tạo từ `ai-service/.env.portal`) và biến `SCOREPLUS_<TÊN>` của server Portal; xem [frontend/README.md](../frontend/README.md).
+- **Chạy riêng:** cần URL HTTPS (reverse proxy) vì Portal chạy HTTPS, thêm origin Portal vào `CORS_ALLOWED_ORIGINS`. Khi chạy sau reverse proxy, rate limit dựa trên `X-Forwarded-For`.
 - Kong chặn preflight CORS khi thiếu khóa, vì vậy trình duyệt không thể gọi LLM trực tiếp; luôn đi qua service này.
 
 ## Giới hạn đã biết

@@ -142,3 +142,42 @@ test('ollama provider uses /api/chat protocol', async () => {
   assert.equal(call.url, 'http://host/ollama/api/chat');
   assert.equal(call.body.options.num_predict, 400);
 });
+
+test('embedded in AI-Portal: reads pre-parsed body, skips CORS and rate limits per Portal user', async () => {
+  const config = { ...loadConfig({ LLM_API_KEY: 'secret', HINT_LOG_DIR: '', RATE_LIMIT_PER_MINUTE: '1' }), embedded: true };
+  const handle = createApp(config, { fetchImpl: async () => reply('Gợi ý.') });
+  // Giống Portal: express.json() đã đọc body, mount cắt /api/apps/scoreplus, middleware gắn X-User-*.
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    req.body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+    await handle(req, res);
+  }).listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const as = (id, email = `${id}@neu.edu.vn`) => ({ Origin: 'https://ai.neu.edu.vn', 'X-User-Id': id, 'X-User-Email': email });
+  try {
+    const ok = await post(base, question, as('u1'));
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get('access-control-allow-origin'), null);
+    assert.equal((await ok.json()).content, 'Gợi ý.');
+    assert.equal((await post(base, question, as('u1'))).status, 429);
+    assert.equal((await post(base, question, as('u2'))).status, 200); // tài khoản khác cùng IP không bị chặn
+  } finally { server.close(); }
+});
+
+test('embedded config ignores Portal-wide env and lets SCOREPLUS_* override the package .env', async () => {
+  const { embedEnv } = await import('../portal/embed.js');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'scoreplus-env-'));
+  try {
+    await writeFile(join(dir, '.env'), 'LLM_API_KEY=from-file\nLLM_MODEL=file-model\n');
+    const env = embedEnv({ LLM_API_KEY: 'portal-own-key', PORT: '3001', SCOREPLUS_LLM_MODEL: 'override' }, join(dir, '.env'));
+    assert.equal(env.LLM_API_KEY, 'from-file');
+    assert.equal(env.LLM_MODEL, 'override');
+    assert.equal(env.PORT, undefined);
+    assert.match(env.HINT_LOG_DIR, /app-logs[\\/]scoreplus$/);
+  } finally { await rm(dir, { recursive: true }); }
+});

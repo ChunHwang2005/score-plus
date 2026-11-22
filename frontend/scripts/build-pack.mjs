@@ -8,11 +8,12 @@ const env = {
   ...process.env,
   PORTAL_BASE_PATH: target === 'neu' ? '/apps' : '',
   SCOREPLUS_PACK_TARGET: target,
+  // ai-service được gộp vào gói và gọi qua /api/apps/scoreplus; bỏ URL dev (localhost) từ .env.local.
+  NEXT_PUBLIC_SCOREPLUS_AI_URL: '',
+  NEXT_PUBLIC_SCOREPLUS_AI_BUNDLED: '1',
   ...(target === 'neu' ? {
     NEXT_PUBLIC_SCOREUP_API_URL: 'https://fit.neu.edu.vn/scoreup/v1/api',
     NEXT_PUBLIC_SCOREUP_MEDIA_URL: 'https://fit.neu.edu.vn/scoreup/media/',
-    // URL HTTPS của ai-service production; để trống = dùng Central LLM của Portal (không nhúng localhost từ .env.local).
-    NEXT_PUBLIC_SCOREPLUS_AI_URL: process.env.SCOREPLUS_NEU_AI_URL || '',
   } : {}),
 };
 

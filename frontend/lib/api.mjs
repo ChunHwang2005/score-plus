@@ -16,6 +16,9 @@ export async function request(path, { token, body, method, signal, keepalive } =
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: signal || AbortSignal.timeout(30000),
       credentials: 'omit',
+      // Apache trước ScoreUp production bỏ Access-Control-Allow-Origin khỏi phản hồi 304 → trình duyệt chặn CORS.
+      // no-store: không gửi If-None-Match nên luôn nhận 200 có header CORS.
+      cache: 'no-store',
       ...(keepalive ? { keepalive: true } : {}), // gửi được khi trang đang đóng
     });
   } catch (error) {

@@ -1,12 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, BookOpen, Check, CheckCircle2, ChevronRight, CircleHelp, Clock3, GraduationCap, LogOut, Save, Send, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, CheckCircle2, ChevronRight, CircleHelp, Clock3, GraduationCap, ListChecks, LogOut, Save, Send, Sparkles, Trash2, X } from 'lucide-react';
 import { mediaUrl, request } from '../lib/api.mjs';
-import { MAX_TRIES, certificateIdOf, chapterName, parseQuestion, questionDone, resultPayload, reviewItems, scoredAnswers, sectionOf, unwrap } from '../lib/practice.mjs';
+import { MAX_TRIES, answerStatus, attemptSummary, certificateIdOf, chapterName, formatDateTime, optionTag, optionWrong, parseQuestion, questionDone, resultPayload, reviewItems, sectionOf, statusLabel, unwrap } from '../lib/practice.mjs';
 import { createDraftStore, newAttemptId } from '../lib/drafts.mjs';
-import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser } from '../lib/portal-auth.mjs';
-import { createEventQueue, experimentFor, loadExperiment, saveConsent, sendEvents } from '../lib/experiment.mjs';
+import { loadPortalUser, loadScoreupSessionFromPortal, portalApiPath, subscribePortalUser, tutorApiBase } from '../lib/portal-auth.mjs';
+import { STAGE_LABELS, openStudyStage, saveStudyDraft, submitStudyStage, activeStudy, completeExperiment, createEventQueue, instantFor, loadExperiment, lockStudy, pendingPractice, practiceAttemptId, saveConsent, sendEvents } from '../lib/experiment.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
 import Markdown from './Markdown';
@@ -16,9 +16,14 @@ import { clearStandaloneSession, isStandalone, loadStandaloneSession, microsoftL
 
 // Endpoint SSO của AI-Portal (backend routes/scoreplus.ts); env chỉ dùng khi Portal đặt endpoint ở path khác.
 const SESSION_PATH = process.env.NEXT_PUBLIC_PORTAL_SCOREUP_SESSION_PATH || '/api/scoreplus/session';
-// ScorePlus AI service (ai-service/, gọi Ollama ở server). Để trống = dùng Central LLM của AI-Portal.
+// ScorePlus AI service (ai-service/, gọi LLM ở server): URL riêng khi dev; gói Portal nhúng sẵn ai-service (BUNDLED=1).
+// Không có cả hai = dùng Central LLM của AI-Portal.
 const AI_URL = (process.env.NEXT_PUBLIC_SCOREPLUS_AI_URL || '').replace(/\/+$/, '');
+const AI_BUNDLED = process.env.NEXT_PUBLIC_SCOREPLUS_AI_BUNDLED === '1';
 const AI_HINTS_KEY = 'scoreplus:ai-hints';
+const STUDY_LABEL = 'Bài luyện tập nghiên cứu';
+// Thang Likert đánh giá gợi ý: [trường, nhãn, nghĩa của 1, nghĩa của 5].
+const RATING_FIELDS = [['helpful', 'Hữu ích', 'Không hữu ích', 'Rất hữu ích'], ['clear', 'Dễ hiểu', 'Khó hiểu', 'Rất dễ hiểu']];
 
 const HINT_SYSTEM = 'Bạn là gia sư học tập bằng tiếng Việt. Hãy giúp sinh viên tự suy luận: nêu một gợi ý cụ thể và giải thích ngắn gọn vì sao hướng suy nghĩ đó hữu ích. Không tiết lộ chữ cái hoặc nội dung đáp án đúng, không chọn đáp án hộ sinh viên. Chỉ dựa trên nội dung được cung cấp; nếu thiếu dữ kiện, hãy nói rõ điều đó. Trả lời ngắn, dễ hiểu, tối đa 120 từ.';
 function hintPrompt(question, selected) {
@@ -38,6 +43,8 @@ export default function Practice() {
   const [drafts, setDrafts] = useState([]);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  // Bài chưa nộp đang chờ xác nhận xoá (popup), null = không mở.
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const [successOpen, setSuccessOpen] = useState(false);
   const [draftSave, setDraftSave] = useState('idle');
   const [subjects, setSubjects] = useState([]);
@@ -81,13 +88,23 @@ export default function Practice() {
   const toastTimer = useRef(null);
   const subject = subjects.find(s => s._id === subjectId);
   const answered = questions.filter(q => answers[q.id]).length;
-  const scored = scoredAnswers(questions, answers, tries, !!batch?.instant);
-  const correct = questions.filter(q => scored[q.id] && scored[q.id] === q.correct).length;
+  // Chấm theo lựa chọn cuối: phản hồi ngay thì đúng trong tối đa MAX_TRIES lần thử là đúng.
+  const correct = questions.filter(q => answers[q.id] && answers[q.id] === q.correct).length;
+  // Chế độ có gia sư (phản hồi ngay): "nộp bài" là kết thúc lượt và xem tổng kết.
+  const summaryMode = !!batch?.instant;
   const done = q => !!batch?.instant && questionDone(q, answers[q.id], tries[q.id]);
-  const batchStudy = batch ? experimentFor(study, batch.subject?._id) : null;
-  // Trong thực nghiệm luôn phản hồi ngay, nhóm quyết định có gia sư (đối chứng thì không); ngoài thực nghiệm theo chế độ của lượt.
-  const tutorEnabled = batchStudy ? !!batchStudy.group.tutor_enabled : !!batch?.instant;
-  const studyForSubject = experimentFor(study, subjectId);
+  // Điều kiện thực nghiệm đã chốt khi bắt đầu lượt (lockStudy); null = lượt ngoài thực nghiệm.
+  const batchStudy = batch?.study || null;
+  const canLeaveAfterSubmit = !batchStudy?.stage || batchStudy.stage === 'posttest';
+  // Trong thực nghiệm nhóm quyết định: có gia sư (phản hồi ngay) hoặc làm như bài thi; ngoài thực nghiệm theo chế độ của lượt.
+  const tutorEnabled = batchStudy ? batchStudy.tutorEnabled : !!batch?.instant;
+  const studyForSubject = activeStudy(study, subjectId);
+  // Bài luyện tập admin cấu hình cho đợt: mô tả trong hộp thoại; studyPractice chỉ có khi đã đồng ý mà chưa làm xong.
+  const studyPractice = pendingPractice(study);
+  const studyFlowPending = !!studyPractice?.stage;
+  const practiceConfig = study?.experiment?.flow ? pendingPractice({ ...study, consent: true }) : study?.experiment?.practice;
+  const practiceSubject = practiceConfig && subjects.find(s => s._id === practiceConfig.subject_id);
+  const practiceInfo = study?.experiment?.flow ? `Đầu vào → Luyện tập → Đầu ra${study.stage ? ` · Tiếp theo: ${STAGE_LABELS[study.stage]}` : ''}` : practiceConfig ? `${practiceSubject?.subject_name || 'Môn của đợt'}${practiceConfig.chapter ? ` · ${chapterName(practiceConfig.chapter)}` : ''} · ${practiceConfig.question_count} câu` : '';
   const userId = session ? String(session.user._id || session.user.id) : '';
 
   useEffect(() => {
@@ -220,7 +237,8 @@ export default function Practice() {
     loadExperiment(session.token, { signal: controller.signal }).then(info => {
       if (controller.signal.aborted) return;
       setStudy(info);
-      if (info && info.consent === null) setConsentOpen(true);
+      // Chưa trả lời → hỏi đồng ý; đã đồng ý nhưng chưa làm bài của đợt → nhắc vào làm. Làm xong thì không hiện nữa.
+      if (info && !info.completed && (info.consent === null || pendingPractice(info))) setConsentOpen(true);
     }).catch(() => {});
     return () => controller.abort();
   }, [session?.token]);
@@ -237,7 +255,7 @@ export default function Practice() {
   }, [eventQueue]);
 
   function track(type, question, data = {}, target = batch) {
-    if (!eventQueue || !target || !experimentFor(study, target.subject?._id)) return;
+    if (!eventQueue || !target?.study || target.study.experimentId !== study?.experiment?.id) return;
     eventQueue.push({
       type, attempt_id: target.id, subject_id: String(target.subject?._id || ''),
       ...(question ? { question_id: String(question.id) } : {}), client_ts: new Date().toISOString(), data,
@@ -248,12 +266,50 @@ export default function Practice() {
     if (!study || !session) return;
     try {
       const result = await saveConsent(session.token, study.experiment.id, agree);
-      setStudy(current => current && { ...current, consent: result?.consent ?? agree });
+      const next = study.experiment.flow ? await loadExperiment(session.token) : { ...study, consent: result?.consent ?? agree };
+      setStudy(next);
       setConsentOpen(false);
+      // Đợt có bài luyện tập: đồng ý là vào làm luôn.
+      if (pendingPractice(next)) { startStudyPractice(next); return; }
       notify('success', agree ? 'Cảm ơn bạn đã tham gia' : 'Đã ghi nhận lựa chọn', agree ? 'Dữ liệu luyện tập được ghi ẩn danh cho nghiên cứu.' : 'Dữ liệu luyện tập của bạn sẽ không được thu thập.');
     } catch (e) {
       notify('error', 'Chưa lưu được lựa chọn', e.message);
     }
+  }
+
+  // Bài luyện tập admin cấu hình cho đợt. Id lượt cố định theo đợt: mở lại thì làm tiếp bản nháp đã tự lưu.
+  function startStudyPractice(current = study) {
+    const practice = pendingPractice(current);
+    if (!session || !draftStore || !practice) return;
+    setConsentOpen(false);
+    const selected = subjects.find(s => s._id === practice.subject_id);
+    if (!selected) { notify('error', 'Chưa mở được bài nghiên cứu', loadingSubjects ? 'Đang tải danh sách môn học, hãy thử lại sau giây lát.' : 'Môn của đợt nghiên cứu không có trong danh sách luyện tập.'); return; }
+    if (current.experiment.flow) {
+      run('questions', async () => {
+        await settleSaves();
+        const data = await openStudyStage(session.token, current.experiment.id, current.stage);
+        setSubjectId(selected._id); setChapter('');
+        enterExam({ id: data.attempt_id, subject: selected, chapter: '', label: STAGE_LABELS[data.stage], instant: data.instant, start: data.start, hintsUsed: data.hints_used || 0, restoredTries: data.tries, userId }, data.questions, data.answers, current);
+        notify('success', STAGE_LABELS[data.stage], data.instant ? 'Có gia sư AI và phản hồi ngay.' : 'Không có gia sư AI; nộp bài để xem kết quả.');
+      });
+      return;
+    }
+    const id = practiceAttemptId(current.experiment.id);
+    const generation = authGeneration.current;
+    run('questions', async () => {
+      const draft = await draftStore.get(id).catch(() => null);
+      if (generation !== authGeneration.current) return;
+      setSubjectId(selected._id); setChapter(practice.chapter || '');
+      if (draft?.questions?.length) {
+        enterExam({ id, subject: selected, chapter: draft.chapter || '', label: STUDY_LABEL, instant: !!draft.instant, start: draft.start, hintsUsed: draft.hints_used || 0, userId }, draft.questions, draft.answers || {}, current);
+        notify('success', 'Tiếp tục bài nghiên cứu', `${selected.subject_name} · ${draft.questions.length} câu hỏi`);
+        return;
+      }
+      const parsed = await fetchQuestions(selected, practice.chapter || '', practice.question_count);
+      if (generation !== authGeneration.current) return;
+      enterExam({ id, subject: selected, chapter: practice.chapter || '', label: STUDY_LABEL, instant: instantFor(current, selected._id, aiHints, id), start: new Date().toISOString(), userId }, parsed, {}, current);
+      notify('success', 'Đã bắt đầu bài nghiên cứu', `${selected.subject_name} · ${parsed.length} câu hỏi`);
+    });
   }
 
   const draftStore = useMemo(() => session ? createDraftStore({ token: session.token, userId, request }) : null, [session?.token, userId]);
@@ -276,7 +332,13 @@ export default function Practice() {
 
   // Ghi nháp tuần tự: mỗi lần lưu chờ lần trước xong, để PUT cũ không tới server sau khi đã nộp/xoá.
   function persistDraft(draft) {
-    const run = (pendingSave.current || Promise.resolve()).catch(() => {}).then(() => draftStore.save(draft));
+    const run = (pendingSave.current || Promise.resolve()).catch(() => {}).then(async () => {
+      if (draft.study?.stage) {
+        await saveStudyDraft(session.token, draft.study.experimentId, draft.study.stage, { answers: draft.answers, tries: draft.tries, hints_used: draft.hints_used });
+        return { id: draft.id, studyDraft: true };
+      }
+      return draftStore.save(draft);
+    });
     pendingSave.current = run;
     return run;
   }
@@ -289,14 +351,14 @@ export default function Practice() {
       setDraftSave('saving');
       persistDraft(draftOf()).then(summary => {
         if (activeAttempt.current !== summary.id) return;
-        upsertDraft(summary); setDraftSave('saved');
+        if (!summary.studyDraft) upsertDraft(summary); setDraftSave('saved');
       }).catch(() => { if (activeAttempt.current === batch.id) setDraftSave('error'); });
     }, 1200);
     return () => clearTimeout(timer);
   }, [view, submitted, batch, answers, questions, userId, draftStore]);
 
   function draftOf() {
-    return { id: batch.id, subject: batch.subject, chapter: batch.chapter, label: batch.label || '', instant: batch.instant, start: batch.start, hints_enabled: tutorEnabled, hints_used: batch.hintsUsed || 0, questions, answers };
+    return { id: batch.id, subject: batch.subject, chapter: batch.chapter, label: batch.label || '', instant: batch.instant, start: batch.start, hints_enabled: tutorEnabled, hints_used: batch.hintsUsed || 0, questions, answers, tries, study: batch.study };
   }
 
   function clearAttempt() {
@@ -307,12 +369,14 @@ export default function Practice() {
 
   function goHome() { clearAttempt(); setView('home'); window.scrollTo?.({ top: 0 }); }
 
-  function enterExam(nextBatch, nextQuestions, nextAnswers = {}) {
+  // currentStudy: truyền khi vừa đổi study (vd. vừa đồng ý) mà state chưa kịp cập nhật.
+  function enterExam(attempt, nextQuestions, nextAnswers = {}, currentStudy = study) {
+    const nextBatch = { ...attempt, study: lockStudy(currentStudy, attempt.subject?._id, attempt.instant, attempt.id) };
     activeAttempt.current = nextBatch.id;
     setQuestions(nextQuestions); setAnswers(nextAnswers); setBatch(nextBatch); setDraftSave('idle');
-    setSaved(null); setSubmitted(false); setHints({}); setHintBusy({});
+    setSaved(null); setSubmitted(false); setSuccessOpen(false); setHints({}); setHintBusy({});
     // Bài nháp khôi phục: coi lựa chọn đã lưu là lần thử đầu.
-    setTries(Object.fromEntries(Object.entries(nextAnswers).filter(([, key]) => key).map(([id, key]) => [id, [key]])));
+    setTries(nextBatch.restoredTries || Object.fromEntries(Object.entries(nextAnswers).filter(([, key]) => key).map(([id, key]) => [id, [key]])));
     setPriorWrong(nextBatch.priorWrong || {});
     loadPriorWrong(nextBatch.id, nextQuestions);
     setView('exam'); window.scrollTo?.({ top: 0 });
@@ -337,14 +401,15 @@ export default function Practice() {
     const draft = draftOf();
     run('leave', async () => {
       const summary = await persistDraft(draft);
-      upsertDraft(summary);
+      if (!summary.studyDraft) upsertDraft(summary);
       goHome();
-      notify('success', 'Đã lưu bài chưa nộp', draftStore.mode === 'server' ? 'Bạn có thể làm tiếp trong Lịch sử làm bài, kể cả trên thiết bị khác.' : 'Bạn có thể làm tiếp trong Lịch sử làm bài trên trình duyệt này.');
+      notify('success', 'Đã lưu bài chưa nộp', draft.study?.stage ? 'Vào lại đợt thực nghiệm để tiếp tục đúng giai đoạn, kể cả trên thiết bị khác.' : draftStore.mode === 'server' ? 'Bạn có thể làm tiếp trong Lịch sử làm bài, kể cả trên thiết bị khác.' : 'Bạn có thể làm tiếp trong Lịch sử làm bài trên trình duyệt này.');
     });
   }
 
   function resume(summary) {
     if (!session || !draftStore) return;
+    if (studyFlowPending || (study?.experiment?.flow && summary.id.startsWith(`exp-${study.experiment.id}-`))) { startStudyPractice(); return; }
     run(`resume:${summary.id}`, async () => {
       const draft = await draftStore.get(summary.id);
       if (!draft.questions.length) throw new Error('Các câu hỏi của bài này không còn trong ngân hàng câu hỏi.');
@@ -354,10 +419,17 @@ export default function Practice() {
   }
 
   function deleteDraft(summary) {
-    if (!draftStore || !window.confirm(`Xoá bài chưa nộp "${summary.subjectName} · ${sectionOf(summary)}"? Không thể khôi phục.`)) return;
+    if (draftStore) setDeleteTarget(summary);
+  }
+
+  function confirmDeleteDraft() {
+    const summary = deleteTarget;
+    if (!summary || !draftStore) return;
     run(`delete:${summary.id}`, async () => {
       await draftStore.remove(summary.id);
       setDrafts(list => list.filter(d => d.id !== summary.id));
+      setDeleteTarget(null);
+      notify('success', 'Đã xoá bài chưa nộp', `${summary.subjectName} · ${sectionOf(summary)}`);
     });
   }
 
@@ -408,12 +480,13 @@ export default function Practice() {
   // Từ màn xem lại: tạo lượt mới chỉ gồm các câu sai/bỏ trống (đã có sẵn nội dung, không cần gọi API).
   function retryQuestions(result, retry) {
     if (!session) return;
+    if (studyFlowPending) { startStudyPractice(); return; }
     const selected = subjects.find(s => certificateIdOf(s) === result.certificateId);
     if (!selected) { notify('error', 'Không tìm thấy môn học', 'Môn của lượt này không còn trong danh sách luyện tập.'); return; }
     setSubjectId(selected._id); setChapter('');
     // Câu đã chọn sai ở lượt đang xem tính ít nhất 1 lần sai (bỏ trống không tính); ScoreUp bổ sung đủ lịch sử sau.
     const priorWrong = Object.fromEntries(reviewItems(result).filter(item => item.status === 'wrong').map(item => [item.id, 1]));
-    enterExam({ id: newAttemptId(), subject: selected, chapter: '', label: 'Ôn lại câu chưa đúng', instant: aiHints || !!experimentFor(study, selected._id), start: new Date().toISOString(), userId, priorWrong }, retry);
+    enterExam({ id: newAttemptId(), subject: selected, chapter: '', label: 'Ôn lại câu chưa đúng', instant: instantFor(study, selected._id, aiHints), start: new Date().toISOString(), userId, priorWrong }, retry);
     notify('success', 'Đã tạo lượt ôn lại', `${retry.length} câu chưa đúng từ lượt trước.`);
   }
 
@@ -450,7 +523,7 @@ export default function Practice() {
   }
 
   async function requestHint(question) {
-    if (hintBusy[question.id]) return;
+    if (!tutorEnabled || hintBusy[question.id]) return;
     const generation = authGeneration.current;
     const attemptId = batch?.id;
     setHintBusy(current => ({ ...current, [question.id]: true }));
@@ -461,8 +534,9 @@ export default function Practice() {
       const previous = hints[question.id];
       const hintCount = previous && previous.attempt === attemptCount ? previous.count + 1 : 1;
       const started = performance.now();
-      const response = AI_URL
-        ? await fetch(`${AI_URL}/v1/hint`, {
+      const aiBase = tutorApiBase({ url: AI_URL, bundled: AI_BUNDLED });
+      const response = aiBase
+        ? await fetch(`${aiBase}/v1/hint`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // Chỉ gửi dữ liệu câu hỏi; ai-service tự dựng prompt và giữ khóa Ollama.
@@ -474,7 +548,8 @@ export default function Practice() {
             revealed: !!(batch?.instant && selected), answer_shown: done(question), attempts: attemptCount, prior_wrong: priorWrong[question.id] || 0, hint_count: hintCount,
           }),
           signal: AbortSignal.timeout(75000),
-          credentials: 'omit',
+          // Bản nhúng cùng origin: gửi cookie để Portal gắn X-User-* (giới hạn tần suất theo tài khoản).
+          credentials: AI_URL ? 'omit' : 'same-origin',
         })
         : await fetch(portalApiPath('/api/ai/complete'), {
           method: 'POST',
@@ -486,8 +561,8 @@ export default function Practice() {
       const data = await response.json().catch(() => null);
       if (generation !== authGeneration.current) return;
       if (!response.ok) {
-        if (response.status === 503 && !AI_URL) throw new Error(data?.message || 'AI-Portal chưa cấu hình Central LLM.');
-        throw new Error(data?.message || `${AI_URL ? 'AI service' : 'AI-Portal'} trả về lỗi (${response.status}).`);
+        if (response.status === 503 && !aiBase) throw new Error(data?.message || 'AI-Portal chưa cấu hình Central LLM.');
+        throw new Error(data?.message || `${aiBase ? 'AI service' : 'AI-Portal'} trả về lỗi (${response.status}).`);
       }
       if (!data?.content) throw new Error('AI chưa tạo được gợi ý. Hãy thử lại.');
       const label = data.status === 'insufficient' ? 'Chưa đủ căn cứ' : data.level ? `Gợi ý cấp ${data.level} · ${data.label}` : data.label || 'Gợi ý học tập';
@@ -510,26 +585,35 @@ export default function Practice() {
     }
   }
 
+  /** Lấy câu hỏi từ ScoreUp, bỏ câu lỗi và câu trùng (kể cả với `existingIds` đang có trong lượt). */
+  async function fetchQuestions(selected, chapterId, limit, existingIds = []) {
+    const data = unwrap(await request('/questions', { token: session.token, body: { subject_id: selected._id, chapter_id: chapterId, limit: Number(limit) } }));
+    if (!Array.isArray(data)) throw new Error('Dữ liệu câu hỏi không hợp lệ.');
+    const existing = new Set(existingIds);
+    const parsed = data.flat().map(parseQuestion).filter(q => {
+      if (!q.id || !q.question || !q.options.length || existing.has(q.id)) return false;
+      existing.add(q.id); return true;
+    });
+    if (!parsed.length && !existingIds.length) throw new Error('Chưa có câu hỏi cho lựa chọn này. Hãy chọn chương hoặc môn khác.');
+    return parsed;
+  }
+
   function start(append = false) {
     if (!session) return;
+    if (append && batchStudy?.stage) return;
+    if (!append && studyFlowPending) { startStudyPractice(); return; }
     if (!subject) return;
     if (append && batch?.userId !== userId) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
     const selected = append ? batch.subject : subject;
     const selectedChapter = append ? batch.chapter : chapter;
     const generation = authGeneration.current;
     run('questions', async () => {
-      const data = unwrap(await request('/questions', { token: session.token, body: { subject_id: selected._id, chapter_id: selectedChapter, limit: Number(count) } }));
+      const parsed = await fetchQuestions(selected, selectedChapter, count, append ? questions.map(q => q.id) : []);
       if (generation !== authGeneration.current) return;
-      if (!Array.isArray(data)) throw new Error('Dữ liệu câu hỏi không hợp lệ.');
-      const existing = new Set(append ? questions.map(q => q.id) : []);
-      const parsed = data.flat().map(parseQuestion).filter(q => {
-        if (!q.id || !q.question || !q.options.length || existing.has(q.id)) return false;
-        existing.add(q.id); return true;
-      });
       if (!parsed.length) throw new Error(append ? 'Chưa có câu hỏi mới trong lượt này. Bạn có thể thử lại.' : 'Chưa có câu hỏi cho lựa chọn này. Hãy chọn chương hoặc môn khác.');
       if (!append) {
-        // Trong thực nghiệm cả hai nhóm luôn dùng phản hồi ngay để so sánh việc sửa sai.
-        enterExam({ id: newAttemptId(), subject: selected, chapter: selectedChapter, instant: aiHints || !!experimentFor(study, selected._id), start: new Date().toISOString(), userId }, parsed);
+        // Trong thực nghiệm: nhóm có gia sư phản hồi ngay, nhóm không gia sư làm như bài thi.
+        enterExam({ id: newAttemptId(), subject: selected, chapter: selectedChapter, instant: instantFor(study, selected._id, aiHints), start: new Date().toISOString(), userId }, parsed);
         notify('success', 'Đã bắt đầu luyện tập', `${selected.subject_name} · ${parsed.length} câu hỏi`);
       } else {
         setQuestions(current => [...current, ...parsed]);
@@ -551,14 +635,34 @@ export default function Practice() {
     if (batch.userId !== userId) { setError('Tài khoản đã thay đổi. Hãy bắt đầu lượt luyện tập mới.'); return; }
     const generation = authGeneration.current;
     run('submit', async () => {
-      const payload = resultPayload({ questions, answers: scored, subject: batch.subject, section: sectionOf(batch), start: batch.start, end: new Date().toISOString() });
+      if (batch.study?.stage) {
+        await settleSaves();
+        const data = await submitStudyStage(session.token, batch.study.experimentId, batch.study.stage, { answers, tries: batch.instant ? tries : {} });
+        if (generation !== authGeneration.current) return;
+        const byId = new Map(data.result.items.map(item => [item.question_id, item]));
+        setQuestions(list => list.map(q => ({ ...q, correct: byId.get(q.id)?.correct_answer || '' })));
+        setAnswers(Object.fromEntries(data.result.items.filter(item => item.selected).map(item => [item.question_id, item.selected])));
+        setTries(Object.fromEntries(data.result.items.map(item => [item.question_id, item.tries])));
+        setStudy(data.study); setSaved(data.result); setSubmitted(true);
+        track('submit', null, { correct: data.result.correct, total: data.result.total });
+        eventQueue?.flush();
+        activeAttempt.current = ''; setHistoryVersion(v => v + 1); setSuccessOpen(true);
+        return;
+      }
+      const payload = resultPayload({ questions, answers, tries: batch.instant ? tries : {}, subject: batch.subject, section: sectionOf(batch), start: batch.start, end: new Date().toISOString() });
       // Chờ lần tự lưu đang chạy xong, rồi ScoreUp xoá nháp theo draftId cùng lúc lưu kết quả.
       await settleSaves();
-      const result = unwrap(await request('/questions/result', { token: session.token, body: { ...payload, draftId: batch.id, hints_enabled: tutorEnabled, hints_used: batch.hintsUsed || 0 } }));
+      const result = unwrap(await request('/questions/result', { token: session.token, body: { ...payload, draftId: batch.id, idempotency_key: batch.id, hints_enabled: tutorEnabled, hints_used: batch.hintsUsed || 0 } }));
       if (generation !== authGeneration.current) return;
       setSaved(result); setSubmitted(true);
       track('submit', null, { correct, total: questions.length });
       eventQueue?.flush();
+      // Nộp xong bài luyện tập của đợt → hoàn thành; từ lượt sau ScorePlus không hiện thực nghiệm nữa.
+      const finished = batch.study;
+      if (finished && batch.id === practiceAttemptId(finished.experimentId)) {
+        setStudy(current => current?.experiment?.id === finished.experimentId ? { ...current, completed: true } : current);
+        completeExperiment(session.token, finished.experimentId, batch.id).catch(() => {}); // lỗi: lần sau mở lại, nộp lại trả kết quả cũ (idempotency) rồi báo lại
+      }
       activeAttempt.current = '';
       if (draftStore?.mode === 'local') draftStore.remove(batch.id).catch(() => {});
       setDrafts(list => list.filter(d => d.id !== batch.id));
@@ -571,7 +675,21 @@ export default function Practice() {
     {standalone && authState === 'signed-out' && <div className="notice" role="status"><span>Đăng nhập bằng tài khoản Microsoft NEU để làm bài và lưu kết quả.</span><Button onClick={signIn}>Đăng nhập với Microsoft (NEU)</Button></div>}
     {authError && <div className="notice error" role="alert"><span>{authError}</span>{!standalone && <Button variant="text" disabled={!!busy || authState === 'connecting'} onClick={() => { setAuthError(''); setAuthState('waiting'); setAuthReload(v => v + 1); }}>Kết nối lại</Button>}</div>}
     {error && <div className="notice error" role="alert"><span>{error}</span><Button variant="text" onClick={() => setError('')}>Đóng</Button></div>}
-    {study && view === 'home' && <div className="notice" role="status"><span>Lớp của bạn tham gia nghiên cứu <strong>{study.experiment.name}</strong> · {study.consent ? 'bạn đã đồng ý ghi dữ liệu ẩn danh' : study.consent === false ? 'bạn không tham gia thu thập dữ liệu' : 'bạn chưa trả lời'}.</span><Button variant="text" onClick={() => setConsentOpen(true)}>{study.consent ? 'Rút lại đồng ý' : 'Thay đổi lựa chọn'}</Button></div>}
+    {study?.experiment?.flow && study.consent === true && !study.completed && (() => {
+      const stages = study.experiment.stages;
+      const doneCount = stages.filter(stage => study.stage_results?.[stage.key]?.completed_at).length;
+      return <section className="notice study-progress" aria-labelledby="study-progress-title">
+        <div className="study-progress-head"><strong id="study-progress-title">Tiến trình thực nghiệm</strong><span className="muted small">Hoàn thành {doneCount}/{stages.length} bước</span></div>
+        <ol className="study-steps">{stages.map((stage, index) => {
+          const state = study.stage_results?.[stage.key]?.completed_at ? 'done' : study.stage === stage.key ? 'current' : 'upcoming';
+          return <li key={stage.key} className={`study-step ${state}`} aria-current={state === 'current' ? 'step' : undefined}>
+            <span className="study-step-dot" aria-hidden="true">{state === 'done' ? <Check className="icon" /> : index + 1}</span>
+            <span className="study-step-text"><span>{STAGE_LABELS[stage.key]}</span><span className="small">{state === 'done' ? 'Đã hoàn thành' : state === 'current' ? 'Đang thực hiện' : 'Chưa bắt đầu'}</span></span>
+          </li>;
+        })}</ol>
+      </section>;
+    })()}
+    {study && !study.completed && (view === 'home' || submitted) && <div className="notice" role="status"><span>Lớp của bạn tham gia nghiên cứu <strong>{study.experiment.name}</strong> · {study.consent ? (studyPractice ? (study.experiment.flow ? `tiếp theo: ${STAGE_LABELS[study.stage]}` : 'bạn chưa làm bài luyện tập của đợt') : 'bạn đã đồng ý ghi dữ liệu ẩn danh') : study.consent === false ? 'bạn không tham gia thu thập dữ liệu' : 'bạn chưa trả lời'}.</span>{studyPractice && <Button variant="text" disabled={!!busy} onClick={() => startStudyPractice()}>Làm bài nghiên cứu</Button>}<Button variant="text" onClick={() => setConsentOpen(true)}>{study.consent ? 'Rút lại đồng ý' : 'Thay đổi lựa chọn'}</Button></div>}
   </>;
   const percent = questions.length ? Math.round(correct / questions.length * 100) : 0;
 
@@ -590,7 +708,7 @@ export default function Practice() {
 
     {view === 'home' && <>
       {notices}
-      <section className="panel filters" aria-labelledby="filter-title">
+      {!studyFlowPending && <section className="panel filters" aria-labelledby="filter-title">
         <div className="panel-heading"><h2 id="filter-title">Thiết lập luyện tập</h2><span className="muted">Chọn nội dung bạn muốn ôn luyện</span></div>
         <div className="filter-grid">
           <Dropdown label="Môn học" value={subjectId} disabled={loadingSubjects || !!busy} placeholder={loadingSubjects ? 'Đang tải môn học…' : 'Chọn môn học'} options={subjects.map(s => ({ value: s._id, label: s.subject_name }))} onChange={value => { setSubjectId(value); setChapter(''); }} />
@@ -598,11 +716,11 @@ export default function Practice() {
           <Dropdown label="Số câu hỏi" value={count} disabled={!!busy} onChange={setCount} options={[5, 10, 15, 20, 30, 50].map(n => ({ value: n, label: `${n} câu` }))} />
           <Button className="start" disabled={!subject || !!busy || !session} loading={busy === 'questions'} loadingText="Đang lấy câu hỏi…" icon={<Sparkles className="icon" />} onClick={() => start()}>Bắt đầu làm bài</Button>
         </div>
-        <div className="filter-footer"><label className="checkbox assist-toggle"><input type="checkbox" checked={aiHints || !!studyForSubject} disabled={!!busy || !!studyForSubject} onChange={e => changeAiHints(e.target.checked)} /><span className="assist-copy"><span className="assist-title"><Sparkles className="icon" aria-hidden="true" />Gợi ý từ gia sư AI & phản hồi ngay</span><span className="muted small">{studyForSubject ? (studyForSubject.group.tutor_enabled ? 'Do đợt thực nghiệm quy định.' : 'Nhóm đối chứng của đợt thực nghiệm: chỉ phản hồi ngay, không có gợi ý AI.') : aiHints ? `Báo đúng/sai sau mỗi câu, thử lại tối đa ${MAX_TRIES} lần và xin gợi ý AI.` : 'Đang tắt: làm như bài thi, xem đáp án sau khi nộp.'}</span></span></label></div>
+        <div className="filter-footer"><label className="checkbox assist-toggle"><input type="checkbox" checked={studyForSubject ? !!studyForSubject.group.tutor_enabled : aiHints} disabled={!!busy || !!studyForSubject} onChange={e => changeAiHints(e.target.checked)} /><span className="assist-copy"><span className="assist-title"><Sparkles className="icon" aria-hidden="true" />Gợi ý từ gia sư AI & phản hồi ngay</span><span className="muted small">{studyForSubject ? (studyForSubject.group.tutor_enabled ? `Cố định theo đợt nghiên cứu của lớp bạn: báo đúng/sai sau mỗi câu, thử lại tối đa ${MAX_TRIES} lần và xin gợi ý AI.` : 'Cố định theo đợt nghiên cứu của lớp bạn: làm như bài thi, xem kết quả sau khi nộp.') : aiHints ? `Báo đúng/sai sau mỗi câu, thử lại tối đa ${MAX_TRIES} lần và xin gợi ý AI.` : 'Đang tắt: làm như bài thi, xem đáp án sau khi nộp.'}</span></span></label></div>
         {!loadingSubjects && !subjects.length && <p className="muted setup-hint">Chưa có môn học để luyện tập.</p>}
         {!session && <p className="muted setup-hint" role="status">{authState === 'connecting' || authState === 'waiting' ? (standalone ? 'Đang kiểm tra đăng nhập…' : 'Đang kết nối tài khoản từ AI-Portal…') : standalone ? 'Cần đăng nhập Microsoft NEU để làm bài và lưu kết quả.' : 'Cần kết nối phiên AI-Portal với ScoreUp để làm bài và lưu kết quả.'}</p>}
-      </section>
-      <HistoryList session={session} subjects={subjects} loadingSubjects={loadingSubjects} drafts={drafts} busy={busy} version={historyVersion} onOpen={openReview} onResume={resume} onDeleteDraft={deleteDraft} onUnauthorized={expireSession} />
+      </section>}
+      {!studyFlowPending && <HistoryList session={session} subjects={subjects} loadingSubjects={loadingSubjects} drafts={drafts} busy={busy} version={historyVersion} onOpen={openReview} onResume={resume} onDeleteDraft={deleteDraft} onUnauthorized={expireSession} />}
     </>}
 
     {view === 'review' && <>{notices}<ResultReview key={reviewId} session={session} resultId={reviewId} subjects={subjects} onBack={() => setView('home')} onRetry={retryQuestions} onUnauthorized={expireSession} /></>}
@@ -616,35 +734,46 @@ export default function Practice() {
       {notices}
       <div className="practice-layout">
         <section className="question-list" aria-label="Các câu hỏi">
-          {submitted && <div className="notice success" role="status"><div><strong>Đã nộp · {correct}/{questions.length} câu đúng · {percent}%</strong><p>Đáp án và giải thích hiển thị bên dưới.</p></div><div className="notice-actions">{saved?._id && <Button variant="secondary" size="sm" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}<Button size="sm" icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button></div></div>}
+          {submitted && <div className="notice success" role="status"><div><strong>{summaryMode ? 'Tổng kết' : 'Đã nộp'} · {correct}/{questions.length} câu đúng · {percent}%</strong><p>{batchStudy?.stage ? "Đáp án hiển thị bên dưới." : "Đáp án và giải thích hiển thị bên dưới."}</p></div><div className="notice-actions">{saved?._id && <Button variant="secondary" size="sm" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}{canLeaveAfterSubmit && <Button size="sm" icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button>}</div></div>}
           {questions.map((q, i) => {
             const reveal = submitted || done(q);
             const tried = tries[q.id] || [];
             const retrying = batch.instant && !reveal && !!answers[q.id]; // vừa chọn sai, còn lượt thử
-            return <article className="panel question" key={q.id} id={`question-${i}`}>
-              <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {i + 1}</span><span className="muted">{reveal ? answers[q.id] === q.correct ? (batch.instant && tried.length > 1 ? `✓ Đúng ở lần thử ${tried.length}` : '✓ Chính xác') : 'Cần ôn lại' : retrying ? 'Chưa đúng · thử lại' : answers[q.id] ? 'Đã trả lời' : 'Chưa trả lời'}</span></div>
+            const status = reveal ? answerStatus(answers[q.id], q.correct) : null;
+            const shown = { selected: answers[q.id], correct: q.correct, tries: batch.instant ? tried : [] };
+            return <article className={`panel question ${status ? `review-${status}` : ''}`} key={q.id} id={`question-${i}`}>
+              <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {i + 1}</span>{status ? <span className={`status-tag ${status}`}>{statusLabel(status, shown.tries)}</span> : <span className="muted">{retrying ? 'Chưa đúng · thử lại' : answers[q.id] ? 'Đã trả lời' : 'Chưa trả lời'}</span>}</div>
               {q.context && <Markdown>{q.context}</Markdown>}<Markdown>{q.question}</Markdown>
               {q.image && mediaUrl(q.image) && <img className="question-image" src={mediaUrl(q.image)} alt={`Hình minh họa câu ${i + 1}`} />}
               {q.audio && mediaUrl(q.audio) && <audio controls src={mediaUrl(q.audio)} />}
               {q.code && <pre><code>{q.code}</code></pre>}
-              {!submitted && tutorEnabled && <div className="ai-tutor"><Button variant="secondary" size="sm" disabled={!!busy} loading={!!hintBusy[q.id]} loadingText="Gia sư đang suy nghĩ…" icon={<Sparkles className="icon" />} onClick={() => requestHint(q)}>{hints[q.id] ? 'Xin thêm gợi ý' : 'Gợi ý từ gia sư AI'}</Button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>{hints[q.id].label}</strong></div><Markdown>{hints[q.id].content}</Markdown>{hints[q.id].status === 'ok' && eventQueue && batchStudy && <div className="hint-rating" aria-label="Đánh giá gợi ý">{[['helpful', 'Hữu ích'], ['clear', 'Dễ hiểu']].map(([field, text]) => <div key={field} className="rating-row" role="group" aria-label={`Mức ${text.toLowerCase()} từ 1 đến 5`}><span>{text}</span>{[1, 2, 3, 4, 5].map(n => <button key={n} type="button" aria-pressed={hints[q.id].rating?.[field] === n} className={hints[q.id].rating?.[field] === n ? 'active' : ''} onClick={() => rateHint(q, field, n)}>{n}</button>)}</div>)}</div>}{hints[q.id].status === 'ok' && <p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p>}</div>}</div>}
-              <fieldset className="options" disabled={!!busy || !session || submitted || done(q)}><legend className="sr-only">Đáp án câu {i + 1}</legend>{q.options.map(option => <label key={option.key} className={`option ${answers[q.id] === option.key ? 'selected' : ''} ${reveal && q.correct === option.key ? 'correct' : ''} ${(reveal && answers[q.id] === option.key && q.correct !== option.key) || (batch.instant && !submitted && tried.includes(option.key) && option.key !== q.correct) ? 'wrong' : ''}`}><input type="radio" name={`answer-${q.id}`} value={option.key} checked={answers[q.id] === option.key} disabled={batch.instant && tried.includes(option.key)} onChange={() => chooseAnswer(q, option.key)} /><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown></label>)}</fieldset>
+              {!submitted && tutorEnabled && <div className="ai-tutor"><Button variant="secondary" size="sm" disabled={!!busy} loading={!!hintBusy[q.id]} loadingText="Gia sư đang suy nghĩ…" icon={<Sparkles className="icon" />} onClick={() => requestHint(q)}>{hints[q.id] ? 'Xin thêm gợi ý' : 'Gợi ý từ gia sư AI'}</Button>{hints[q.id] && <div className="ai-hint" role="status"><div className="ai-hint-heading"><Sparkles className="icon" /><strong>{hints[q.id].label}</strong></div><Markdown>{hints[q.id].content}</Markdown>{hints[q.id].status === 'ok' && eventQueue && batchStudy && <div className="hint-rating" role="group" aria-label="Đánh giá gợi ý"><div className="hint-rating-head"><span>Gợi ý này thế nào?</span>{RATING_FIELDS.every(([field]) => hints[q.id].rating?.[field]) && <span className="hint-rating-done"><Check className="icon" />Đã ghi nhận</span>}</div>{RATING_FIELDS.map(([field, text, low, high]) => { const value = hints[q.id].rating?.[field]; return <div key={field} className="rating-row"><span className="rating-label" id={`rate-${q.id}-${field}`}>{text}</span><div className="rating-scale" role="radiogroup" aria-labelledby={`rate-${q.id}-${field}`}>{[1, 2, 3, 4, 5].map(n => <button key={n} type="button" role="radio" aria-checked={value === n} aria-label={`${n} – ${n === 1 ? low : n === 5 ? high : `mức ${n}/5`}`} title={n === 1 ? low : n === 5 ? high : `${n}/5`} className={value === n ? 'active' : value > n ? 'fill' : ''} onClick={() => rateHint(q, field, n)}>{n}</button>)}</div><span className="rating-ends" aria-hidden="true"><span>{low}</span><span>{high}</span></span></div>; })}</div>}{hints[q.id].status === 'ok' && <p className="ai-disclaimer">Gợi ý do AI tạo; hãy đối chiếu với nội dung môn học.</p>}</div>}</div>}
+              <fieldset className="options" disabled={!!busy || !session || submitted || done(q)}><legend className="sr-only">Đáp án câu {i + 1}</legend>{q.options.map(option => {
+                // Đã hiện đáp án: cùng cách đánh dấu/nhãn với màn Lịch sử. Đang thử lại: tô đỏ phương án đã thử sai.
+                const wrong = reveal ? optionWrong(option.key, shown) : batch.instant && tried.includes(option.key) && option.key !== q.correct;
+                const tag = reveal ? optionTag(option.key, shown) : '';
+                return <label key={option.key} className={`option ${!reveal && answers[q.id] === option.key && !wrong ? 'selected' : ''} ${reveal && q.correct === option.key ? 'correct' : ''} ${wrong ? 'wrong' : ''}`}><input type="radio" name={`answer-${q.id}`} value={option.key} checked={answers[q.id] === option.key} disabled={batch.instant && tried.includes(option.key)} onChange={() => chooseAnswer(q, option.key)} /><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown>{tag && <span className="option-tag">{tag}</span>}</label>;
+              })}</fieldset>
               {retrying && <p className="retry-note" role="status">Chưa đúng. Em còn {MAX_TRIES - tried.length} lần thử — hãy xin gia sư gợi ý nếu cần.</p>}
-              {reveal && <div className="explanation"><strong>Đáp án: {q.correct || 'Chưa có'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>}
+              {reveal && <div className="explanation"><strong>Đáp án: {q.correct || 'Chưa có'}{status === 'skipped' && ' · Bạn chưa trả lời câu này'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>}
             </article>;
           })}
-          {!submitted && <Button variant="secondary" full disabled={!!busy || !session} icon={<Sparkles className="icon" />} onClick={() => start(true)}>Làm tiếp · thêm {count} câu</Button>}
+          {!submitted && !batchStudy?.stage && <Button variant="secondary" full disabled={!!busy || !session} icon={<Sparkles className="icon" />} onClick={() => start(true)}>Làm tiếp · thêm {count} câu</Button>}
         </section>
-        <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted ? scored[q.id] === q.correct ? 'correct' : 'wrong' : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">{submitted ? 'Chọn số để xem lại từng câu.' : draftSave === 'saving' ? 'Đang lưu nháp…' : draftSave === 'saved' ? `Đã lưu nháp${draftStore?.mode === 'server' ? ' vào tài khoản' : ' trên trình duyệt này'}.` : draftSave === 'error' ? 'Chưa lưu được nháp — sẽ thử lại khi bạn trả lời tiếp.' : 'Bài làm được tự lưu nháp khi bạn trả lời.'}</p><Button full disabled={!!busy || !session || submitted} loading={busy === 'submit'} loadingText="Đang lưu kết quả…" icon={submitted ? <Check className="icon" /> : <Send className="icon" />} onClick={submit}>{submitted ? 'Đã nộp bài' : 'Nộp bài'}</Button></aside>
+        <aside className="panel progress-panel"><h2><Clock3 className="icon" /> Tiến độ làm bài</h2><div className="progress-count"><strong>{answered}<small> / {questions.length}</small></strong><span className="muted">đã trả lời</span></div><progress value={answered} max={questions.length} aria-label="Số câu đã trả lời" /><div className="palette">{questions.map((q, i) => <a key={q.id} href={`#question-${i}`} aria-label={`Đến câu ${i + 1}`} className={submitted || done(q) ? answerStatus(answers[q.id], q.correct) : answers[q.id] ? 'selected' : ''}>{i + 1}</a>)}</div><p className="muted">{submitted ? 'Chọn số để xem lại từng câu.' : draftSave === 'saving' ? 'Đang lưu nháp…' : draftSave === 'saved' ? `Đã lưu nháp${draftStore?.mode === 'server' ? ' vào tài khoản' : ' trên trình duyệt này'}.` : draftSave === 'error' ? 'Chưa lưu được nháp — sẽ thử lại khi bạn trả lời tiếp.' : 'Bài làm được tự lưu nháp khi bạn trả lời.'}</p><Button full disabled={!!busy || !session || submitted} loading={busy === 'submit'} loadingText={summaryMode ? 'Đang tổng kết…' : 'Đang lưu kết quả…'} icon={submitted ? <Check className="icon" /> : summaryMode ? <ListChecks className="icon" /> : <Send className="icon" />} onClick={submit}>{submitted ? (summaryMode ? 'Đã tổng kết' : 'Đã nộp bài') : summaryMode ? 'Xem tổng kết bài làm' : 'Nộp bài'}</Button></aside>
       </div>
     </>}
 
-    <Modal open={consentOpen && !!study} onClose={() => setConsentOpen(false)} labelledBy="consent-title"><div className="confirm-icon"><GraduationCap className="icon-lg" /></div><h2 id="consent-title">Tham gia nghiên cứu: {study?.experiment.name}</h2>{study?.experiment.consent_text ? <Markdown>{study.experiment.consent_text}</Markdown> : <p>Lớp học phần của bạn đang tham gia nghiên cứu về gia sư AI trong luyện tập trắc nghiệm. Nếu đồng ý, quá trình luyện tập (lựa chọn, gợi ý đã xem, đánh giá gợi ý) được ghi lại dưới mã ẩn danh, chỉ dùng cho nghiên cứu và không ảnh hưởng đến điểm học phần.</p>}<p className="muted small">Bạn có thể rút lại đồng ý bất cứ lúc nào; khi đó dữ liệu đã ghi sẽ bị xoá.</p><div className="confirm-actions"><Button variant="secondary" onClick={() => answerConsent(false)}>Không đồng ý</Button><Button icon={<Check className="icon" />} onClick={() => answerConsent(true)}>Đồng ý tham gia</Button></div></Modal>
+    <Modal open={consentOpen && !!study} onClose={() => setConsentOpen(false)} labelledBy="consent-title"><div className="confirm-icon"><GraduationCap className="icon-lg" /></div><h2 id="consent-title">Tham gia nghiên cứu: {study?.experiment.name}</h2>{study?.consent === true ? <p>Bạn đã đồng ý tham gia nghiên cứu.{studyPractice ? ' Hãy hoàn thành lần lượt các bài của đợt.' : ''}</p> : study?.experiment.consent_text ? <Markdown>{study.experiment.consent_text}</Markdown> : <p>Lớp học phần của bạn đang tham gia nghiên cứu về gia sư AI trong luyện tập trắc nghiệm. Nếu đồng ý, quá trình luyện tập (lựa chọn, gợi ý đã xem, đánh giá gợi ý) được ghi lại dưới mã ẩn danh, chỉ dùng cho nghiên cứu và không ảnh hưởng đến điểm học phần.</p>}{practiceConfig && (study?.consent !== true || studyPractice) && <p><strong>Quy trình:</strong> {practiceInfo}.{study?.consent !== true ? ' Đồng ý là vào làm bài ngay;' : ''} hoàn thành sau khi nộp đủ các bài của đợt.</p>}<p className="muted small">Bạn có thể rút lại đồng ý bất cứ lúc nào; khi đó dữ liệu đã ghi sẽ bị xoá.</p><div className="confirm-actions">{study?.consent === true
+      ? <><Button variant="secondary" disabled={!!busy} onClick={() => answerConsent(false)}>Rút lại đồng ý</Button>{studyPractice ? <Button icon={<Sparkles className="icon" />} disabled={!!busy || loadingSubjects} onClick={() => startStudyPractice()}>Làm bài ngay</Button> : <Button onClick={() => setConsentOpen(false)}>Đóng</Button>}</>
+      : <><Button variant="secondary" disabled={!!busy} onClick={() => answerConsent(false)}>Không đồng ý</Button><Button icon={<Check className="icon" />} disabled={!!busy || (!!practiceConfig && loadingSubjects)} onClick={() => answerConsent(true)}>{practiceConfig ? 'Đồng ý và làm bài' : 'Đồng ý tham gia'}</Button></>}</div></Modal>
 
-    <Modal open={submitConfirmOpen} onClose={() => setSubmitConfirmOpen(false)} labelledBy="submit-confirm-title"><div className="confirm-icon"><Send className="icon-lg" /></div><h2 id="submit-confirm-title">Xác nhận nộp bài</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>Bạn có muốn nộp bài ngay bây giờ không?</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.</p></>}<div className="confirm-actions"><Button variant="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</Button><Button icon={<Send className="icon" />} onClick={confirmSubmit}>Xác nhận nộp</Button></div></Modal>
+    <Modal open={submitConfirmOpen} onClose={() => setSubmitConfirmOpen(false)} labelledBy="submit-confirm-title"><div className="confirm-icon">{summaryMode ? <ListChecks className="icon-lg" /> : <Send className="icon-lg" />}</div><h2 id="submit-confirm-title">{summaryMode ? 'Kết thúc và xem tổng kết?' : 'Xác nhận nộp bài'}</h2>{answered < questions.length ? <><p>Bạn còn <strong>{questions.length - answered} câu chưa trả lời</strong>. Những câu này sẽ được tính là chưa đúng khi lưu kết quả.</p><p>{summaryMode ? 'Bạn có muốn kết thúc lượt và xem tổng kết ngay không?' : 'Bạn có muốn nộp bài ngay bây giờ không?'}</p></> : <><p>Bạn đã trả lời đủ <strong>{questions.length} câu</strong>.</p><p>{summaryMode ? 'Kết quả được lưu vào tài khoản ScoreUp; sau đó lượt này không làm tiếp được.' : 'Kết quả sẽ được lưu vào tài khoản ScoreUp. Bạn sẽ không thể chỉnh sửa câu trả lời sau khi nộp.'}</p></>}<div className="confirm-actions"><Button variant="secondary" onClick={() => setSubmitConfirmOpen(false)}>Tiếp tục làm bài</Button><Button icon={summaryMode ? <ListChecks className="icon" /> : <Send className="icon" />} onClick={confirmSubmit}>{summaryMode ? 'Xem tổng kết' : 'Xác nhận nộp'}</Button></div></Modal>
 
-    <Modal open={leaveOpen} onClose={() => setLeaveOpen(false)} labelledBy="leave-title"><div className="confirm-icon"><Save className="icon-lg" /></div><h2 id="leave-title">Rời khỏi bài làm?</h2><p>Bạn đã làm <strong>{answered}/{questions.length} câu</strong>. Bài sẽ được lưu ở mục <strong>Chưa nộp</strong> trong Lịch sử làm bài để bạn làm tiếp sau.</p><div className="confirm-actions"><Button variant="secondary" disabled={busy === 'leave'} onClick={() => setLeaveOpen(false)}>Ở lại làm bài</Button><Button icon={<LogOut className="icon" />} loading={busy === 'leave'} loadingText="Đang lưu…" onClick={confirmLeave}>Lưu và rời khỏi</Button></div></Modal>
+    <Modal open={!!deleteTarget} onClose={() => busy !== `delete:${deleteTarget?.id}` && setDeleteTarget(null)} labelledBy="delete-draft-title"><div className="confirm-icon danger"><Trash2 className="icon-lg" /></div><h2 id="delete-draft-title">Xoá bài chưa nộp?</h2>{deleteTarget && <><p><strong>{deleteTarget.subjectName || 'Bài luyện tập'}</strong> · {sectionOf(deleteTarget)}</p><p>Bạn đã làm <strong>{deleteTarget.answered}/{deleteTarget.total} câu</strong>{deleteTarget.updatedAt ? `, lưu lúc ${formatDateTime(deleteTarget.updatedAt)}` : ''}. Bài sẽ bị xoá vĩnh viễn và không thể khôi phục.</p></>}<div className="confirm-actions"><Button variant="secondary" disabled={busy === `delete:${deleteTarget?.id}`} onClick={() => setDeleteTarget(null)}>Giữ lại</Button><Button variant="danger" icon={<Trash2 className="icon" />} loading={busy === `delete:${deleteTarget?.id}`} loadingText="Đang xoá…" onClick={confirmDeleteDraft}>Xoá bài</Button></div></Modal>
 
-    <Modal open={successOpen} onClose={() => setSuccessOpen(false)} labelledBy="success-title" className="success-dialog"><ScoreRing percent={percent} size="lg" /><h2 id="success-title">Nộp bài thành công!</h2><p>{batch?.subject?.subject_name} · {sectionOf(batch)}</p><p>Bạn trả lời đúng <strong>{correct}/{questions.length} câu</strong>. Kết quả đã được lưu vào tài khoản ScoreUp.</p><div className="confirm-actions">{saved?._id && <Button variant="secondary" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}<Button icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button></div></Modal>
+    <Modal open={leaveOpen} onClose={() => setLeaveOpen(false)} labelledBy="leave-title"><div className="confirm-icon"><Save className="icon-lg" /></div><h2 id="leave-title">Rời khỏi bài làm?</h2><p>Bạn đã làm <strong>{answered}/{questions.length} câu</strong>. {batchStudy?.stage ? <>Bài được lưu trong đợt thực nghiệm; vào lại ScorePlus để tiếp tục đúng giai đoạn.</> : <>Bài sẽ được lưu ở mục <strong>Chưa nộp</strong> trong Lịch sử làm bài để bạn làm tiếp sau.</>}</p><div className="confirm-actions"><Button variant="secondary" disabled={busy === 'leave'} onClick={() => setLeaveOpen(false)}>Ở lại làm bài</Button><Button icon={<LogOut className="icon" />} loading={busy === 'leave'} loadingText="Đang lưu…" onClick={confirmLeave}>Lưu và rời khỏi</Button></div></Modal>
+
+    <Modal open={successOpen} onClose={() => setSuccessOpen(false)} labelledBy="success-title" className="success-dialog"><ScoreRing percent={percent} size="lg" /><h2 id="success-title">{summaryMode ? 'Tổng kết bài làm' : 'Nộp bài thành công!'}</h2><p>{batch?.subject?.subject_name} · {sectionOf(batch)}</p><p>Bạn trả lời đúng <strong>{correct}/{questions.length} câu</strong>. Kết quả đã được lưu vào tài khoản ScoreUp.</p>{summaryMode && (() => { const s = attemptSummary(questions, answers, tries); return <ul className="summary-stats" aria-label="Tổng kết theo số lần thử">{[['first', 'Đúng ngay lần 1'], ['retried', 'Đúng sau khi thử lại'], ['wrong', `Sai${s.wrong ? ` (tối đa ${MAX_TRIES} lần)` : ''}`], ['skipped', 'Bỏ trống']].map(([key, label]) => <li key={key} className={`stat-${key}`}><strong>{s[key]}</strong><span>{label}</span></li>)}</ul>; })()}<div className="confirm-actions">{saved?._id && <Button variant="secondary" icon={<ChevronRight className="icon" />} onClick={() => { const id = saved._id; clearAttempt(); openReview(id); }}>Xem lại chi tiết</Button>}{batchStudy?.stage && studyPractice && <Button icon={<ChevronRight className="icon" />} disabled={!!busy} onClick={() => startStudyPractice()}>Tiếp tục: {STAGE_LABELS[study.stage]}</Button>}{canLeaveAfterSubmit && <Button icon={<LogOut className="icon" />} onClick={goHome}>Rời khỏi luyện đề</Button>}</div></Modal>
   </main>;
 }

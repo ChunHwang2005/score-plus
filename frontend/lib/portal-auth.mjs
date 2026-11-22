@@ -7,6 +7,14 @@ export function portalApiPath(path, win = window) {
   return `${injectedBase || embedMatch?.[1] || ''}${path}`;
 }
 
+// Base URL của ai-service: URL riêng (dev) → ai-service nhúng trong gói Portal (/api/apps/scoreplus) → '' = Central LLM.
+// Không dùng window.__WRITE_API_BASE__: Portal sau reverse proxy (ai.neu.edu.vn/apps) inject giá trị thiếu base path /apps.
+export function tutorApiBase({ url = '', bundled = false } = {}, win = globalThis.window) {
+  const external = String(url).replace(/\/+$/, '');
+  if (external) return external;
+  return bundled ? portalApiPath('/api/apps/scoreplus', win) : '';
+}
+
 function normalizeUser(value) {
   if (!value || typeof value.id !== 'string' || !value.id.trim()) return null;
   return { id: value.id, email: typeof value.email === 'string' ? value.email : '', name: typeof value.name === 'string' ? value.name : '' };

@@ -24,13 +24,10 @@ export const MAX_TRIES = 3;
 export function questionDone(question, answer, tries = [], max = MAX_TRIES) {
   return !!answer && (answer === question.correct || tries.length >= max);
 }
-// Điểm lưu ScoreUp tính theo lần chọn đầu khi được thử lại, để gợi ý không làm tăng điểm luyện tập.
-export function scoredAnswers(questions, answers, tries, instant) {
-  if (!instant) return answers;
-  return Object.fromEntries(questions.filter(q => answers[q.id]).map(q => [q.id, tries[q.id]?.[0] || answers[q.id]]));
-}
-export function resultPayload({ questions, answers, subject, section, start, end }) {
-  const items = questions.map((q, index) => ({ question: q.id, user_ans: answers[q.id] ? [answers[q.id]] : [], correct_ans: q.correct ? [q.correct] : [], score: answers[q.id] && answers[q.id] === q.correct ? 1 : 0, index }));
+// Chấm theo lựa chọn cuối. Ở chế độ phản hồi ngay: đúng trong tối đa MAX_TRIES lần thử thì tính đúng, sai hết lượt thì tính sai.
+// `tries` (chỉ chế độ phản hồi ngay) lưu kèm từng câu để xem lại được "đúng ở lần thử 2" / "sai cả 3 lần".
+export function resultPayload({ questions, answers, tries = {}, subject, section, start, end }) {
+  const items = questions.map((q, index) => ({ question: q.id, user_ans: answers[q.id] ? [answers[q.id]] : [], correct_ans: q.correct ? [q.correct] : [], score: answers[q.id] && answers[q.id] === q.correct ? 1 : 0, index, ...(tries[q.id]?.length ? { tries: tries[q.id] } : {}) }));
   return { certificateId: certificateIdOf(subject), questions: [{ section, multi: false, questions: items }], total: items.length, correct: items.reduce((n, q) => n + q.score, 0), start, end };
 }
 
@@ -48,6 +45,53 @@ export function answerKey(value, options = []) {
   return options.find(option => option.text.trim() === text)?.key || letter;
 }
 
+/** Ghi chú số lần thử cho câu đã chấm: "Đúng ở lần thử 2", "Sai cả 3 lần"; '' khi không có gì đáng nói. */
+export function triesNote(status, tries = []) {
+  if (status === 'correct' && tries.length > 1) return `Đúng ở lần thử ${tries.length}`;
+  if (status === 'wrong' && tries.length >= MAX_TRIES) return `Sai cả ${tries.length} lần`;
+  return '';
+}
+
+// ---------- Hiển thị đáp án dùng chung cho màn làm bài và Lịch sử ----------
+/** Trạng thái chấm của một câu đã hiện đáp án. */
+export function answerStatus(selected, correct) {
+  return !selected ? 'skipped' : selected === correct ? 'correct' : 'wrong';
+}
+
+/** Nhãn thẻ trạng thái: "✓ Chính xác", "✓ Đúng ở lần thử 2", "✗ Sai cả 3 lần", "Bỏ trống". */
+export function statusLabel(status, tries = []) {
+  const note = triesNote(status, tries);
+  if (status === 'correct') return `✓ ${note || 'Chính xác'}`;
+  if (status === 'wrong') return `✗ ${note || 'Sai'}`;
+  return 'Bỏ trống';
+}
+
+/** Phương án bị đánh dấu sai: lựa chọn cuối sai, hoặc đã thử (phản hồi ngay) mà không phải đáp án đúng. */
+export function optionWrong(key, { selected, correct, tries = [] }) {
+  return key !== correct && (key === selected || tries.includes(key));
+}
+
+/** Nhãn nhỏ cạnh phương án khi xem đáp án ('' = không hiện). */
+export function optionTag(key, { selected, correct, tries = [] }) {
+  const tryAt = tries.length > 1 ? tries.indexOf(key) + 1 : 0;
+  if (key === selected && key === correct) return tryAt ? `Lần ${tryAt} · Đúng` : 'Bạn chọn · Đúng';
+  if (tryAt) return `Lần ${tryAt} · Sai`;
+  if (key === selected) return 'Bạn chọn';
+  if (key === correct) return 'Đáp án đúng';
+  return '';
+}
+
+/** Tổng kết lượt phản hồi ngay: đúng ngay lần đầu, đúng sau khi thử lại, sai, bỏ trống. */
+export function attemptSummary(questions, answers, tries = {}) {
+  const out = { first: 0, retried: 0, wrong: 0, skipped: 0 };
+  for (const q of questions) {
+    const status = answerStatus(answers[q.id], q.correct);
+    if (status === 'correct') out[(tries[q.id]?.length || 1) > 1 ? 'retried' : 'first'] += 1;
+    else out[status] += 1;
+  }
+  return out;
+}
+
 export function reviewItems(result) {
   return (result?.questions || []).flatMap(section => (section.questions || []).map((item, i) => {
     const raw = item.question && typeof item.question === 'object' ? item.question : null;
@@ -61,6 +105,7 @@ export function reviewItems(result) {
       question,
       selected,
       correct,
+      tries: (Array.isArray(item.tries) ? item.tries : []).map(t => answerKey(t, options)).filter(Boolean),
       status: !selected ? 'skipped' : item.score > 0 ? 'correct' : 'wrong',
     };
   }));
@@ -124,7 +169,8 @@ export function pageWindow(page, pages, around = 1) {
 
 /** Trạng thái dùng gợi ý AI của một lượt; null khi không có dữ liệu (bản ghi cũ / làm trên ScoreUp). */
 export function hintStatus(enabled, used) {
-  if (enabled === false) return { kind: 'off', label: 'Tắt gợi ý' };
+  // Luôn nêu trạng thái bật/tắt trước, sau đó mới tới số lần dùng.
+  if (enabled === false) return { kind: 'off', label: 'Tắt gợi ý AI' };
   if (enabled !== true) return null;
-  return Number(used) > 0 ? { kind: 'used', label: `Đã dùng gợi ý (${used})` } : { kind: 'unused', label: 'Không dùng gợi ý' };
+  return Number(used) > 0 ? { kind: 'used', label: `Bật gợi ý · dùng ${used} lần` } : { kind: 'unused', label: 'Bật gợi ý · chưa dùng' };
 }

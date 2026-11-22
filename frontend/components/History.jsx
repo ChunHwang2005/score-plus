@@ -3,7 +3,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, CalendarClock, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleHelp, CircleX, History as HistoryIcon, LayoutGrid, ListChecks, Play, RotateCcw, Rows3, Sparkles, Target, Timer, Trash2, Trophy } from 'lucide-react';
 import { mediaUrl, request } from '../lib/api.mjs';
-import { certificateIdOf, formatDateTime, formatDuration, hintStatus, historyStats, pageWindow, resultSummary, reviewItems, scoreTone, sectionOf, unwrap } from '../lib/practice.mjs';
+import { certificateIdOf, formatDateTime, formatDuration, hintStatus, historyStats, pageWindow, resultSummary, optionTag, optionWrong, reviewItems, scoreTone, sectionOf, statusLabel, unwrap } from '../lib/practice.mjs';
 import Button from './Button';
 import Dropdown from './Dropdown';
 import Markdown from './Markdown';
@@ -14,7 +14,6 @@ const FILTERS = [
   { value: 'skipped', label: 'Bỏ trống' },
   { value: 'correct', label: 'Làm đúng' },
 ];
-const STATUS_LABEL = { correct: '✓ Chính xác', wrong: 'Sai', skipped: 'Bỏ trống' };
 
 /** Vòng điểm kiểu kính: rãnh kính mờ + cung SVG dải màu theo mức điểm (đầu bo tròn, có quầng sáng) + lõi kính. */
 export function ScoreRing({ percent, size = 'md' }) {
@@ -114,7 +113,7 @@ function readView() {
 
 function HintTag({ item }) {
   if (!item.hint) return null;
-  return <span className={`hint-tag ${item.hint.kind}`} title="Sử dụng gợi ý từ gia sư AI trong lượt này"><Sparkles className="icon" aria-hidden="true" />{item.hint.label}</span>;
+  return <span className={`hint-tag ${item.hint.kind}`} title={item.hint.kind === 'off' ? 'Lượt này tắt gợi ý từ gia sư AI' : 'Lượt này bật gợi ý từ gia sư AI'}><Sparkles className="icon" aria-hidden="true" />{item.hint.label}</span>;
 }
 
 function StatusTag({ item }) {
@@ -327,16 +326,17 @@ export function ResultReview({ session, resultId, subjects, onBack, onRetry, onU
       <section className="question-list" aria-label="Xem lại câu hỏi">
         <div className="chips" role="group" aria-label="Lọc câu hỏi">{FILTERS.map(f => <button key={f.value} type="button" className={`chip ${filter === f.value ? 'active' : ''}`} aria-pressed={filter === f.value} disabled={!counts[f.value] && f.value !== 'all'} onClick={() => setFilter(f.value)}>{f.label} <span>{counts[f.value]}</span></button>)}</div>
         {!shown.length && <section className="panel empty compact"><p>Không có câu nào trong mục này.</p></section>}
-        {shown.map(({ question: q, selected, correct, status, id, index }) => <article className={`panel question review-${status}`} key={id} id={`review-${index}`}>
-          <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {index + 1}</span><span className={`status-tag ${status}`}>{STATUS_LABEL[status]}</span></div>
+        {shown.map(({ question: q, selected, correct, status, tries, id, index }) => <article className={`panel question review-${status}`} key={id} id={`review-${index}`}>
+          <div className="question-heading"><span className="question-number"><CircleHelp className="icon" /> Câu {index + 1}</span><span className={`status-tag ${status}`}>{statusLabel(status, tries)}</span></div>
           {!q ? <p className="muted">Câu hỏi này không còn trong ngân hàng câu hỏi. {selected && `Bạn đã chọn ${selected}.`} {correct && `Đáp án đúng: ${correct}.`}</p> : <>
             {q.context && <Markdown>{q.context}</Markdown>}<Markdown>{q.question}</Markdown>
             {q.image && mediaUrl(q.image) && <img className="question-image" src={mediaUrl(q.image)} alt={`Hình minh họa câu ${index + 1}`} />}
             {q.audio && mediaUrl(q.audio) && <audio controls src={mediaUrl(q.audio)} />}
             {q.code && <pre><code>{q.code}</code></pre>}
             <ul className="options review-options" aria-label={`Đáp án câu ${index + 1}`}>{q.options.map(option => {
-              const isCorrect = option.key === correct, isPicked = option.key === selected;
-              return <li key={option.key} className={`option ${isCorrect ? 'correct' : ''} ${isPicked && !isCorrect ? 'wrong' : ''}`}><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown>{(isPicked || isCorrect) && <span className="option-tag">{isPicked && isCorrect ? 'Bạn chọn · Đúng' : isPicked ? 'Bạn chọn' : 'Đáp án đúng'}</span>}</li>;
+              // Cùng cách đánh dấu/nhãn với màn làm bài (lib/practice.mjs); phản hồi ngay thì có thứ tự lần thử.
+              const shown = { selected, correct, tries }, tag = optionTag(option.key, shown);
+              return <li key={option.key} className={`option ${option.key === correct ? 'correct' : ''} ${optionWrong(option.key, shown) ? 'wrong' : ''}`}><span className="option-letter">{option.key}</span><Markdown>{option.text}</Markdown>{tag && <span className="option-tag">{tag}</span>}</li>;
             })}</ul>
             <div className="explanation"><strong>Đáp án: {correct || 'Chưa có'}{status === 'skipped' && ' · Bạn chưa trả lời câu này'}</strong>{q.explanation && <Markdown>{q.explanation}</Markdown>}</div>
           </>}

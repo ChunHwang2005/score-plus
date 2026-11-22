@@ -4,7 +4,6 @@
   "name": "ScorePlus",
   "description": "Luyện tập theo môn và chương, sử dụng ngân hàng câu hỏi ScoreUp.",
   "icon": "GraduationCap",
-  "hasFrontendOnly": true,
-  "hasBackend": false,
+  "hasBackend": true,
   "supported_languages": ["vi"]
 }
